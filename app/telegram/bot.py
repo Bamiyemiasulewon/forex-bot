@@ -1,9 +1,20 @@
 import asyncio
+import os
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import (
+    ApplicationBuilder, 
+    CommandHandler, 
+    ContextTypes, 
+    CallbackQueryHandler, 
+    MessageHandler, 
+    filters as TFilters
+)
 from app.telegram.message_templates import format_signal_alert, format_performance, format_educational_tip
 
-TELEGRAM_TOKEN = '8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY'
+logger = logging.getLogger(__name__)
+
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 
 # Message templates
 welcome_message = '''🤖 Welcome to ProfitPro Bot!
@@ -183,6 +194,16 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text('Notification preferences:', reply_markup=reply_markup)
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the help message with all available commands."""
+    await update.message.reply_text(commands_message)
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles regular text messages."""
+    await update.message.reply_text(
+        "I'm a bot and I only understand commands. Please use /help to see the list of available commands."
+    )
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -218,9 +239,26 @@ def send_signal_alert(chat_id, message):
     # To be implemented: send message to user
     pass
 
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+if TELEGRAM_TOKEN:
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+else:
+    logger.critical("TELEGRAM_TOKEN environment variable not set! The bot will not work.")
+    application = None
+
+async def handle_update(update: dict):
+    """Handles incoming Telegram updates."""
+    if not application:
+        logger.error("Application not initialized, cannot handle update.")
+        return
+    await application.update_queue.put(Update.de_json(update, application.bot))
+
+def setup_handlers(app):
+    if not app:
+        logger.warning("Application not initialized, skipping handler setup.")
+        return
+        
     app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('signals', signals))
     app.add_handler(CommandHandler('analysis', analysis))
     app.add_handler(CommandHandler('performance', performance))
@@ -236,4 +274,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('pair_strength', pair_strength))
     app.add_handler(CommandHandler('session_info', session_info))
     app.add_handler(CallbackQueryHandler(button))
-    app.run_polling() 
+    app.add_handler(MessageHandler(TFilters.TEXT & ~TFilters.COMMAND, handle_text_message))
+
+if application:
+    setup_handlers(application) 

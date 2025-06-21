@@ -10,6 +10,7 @@ bcrypt
 python-jose[cryptography]
 pydantic[email]
 Jinja2
+python-telegram-bot
 
 # Celery for background tasks
 celery
