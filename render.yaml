@@ -2,10 +2,9 @@ services:
   - type: web
     name: forex-bot
     env: python
-    pythonVersion: "3.11"
+    pythonVersion: "3.8"
     buildCommand: |
-      pip install --upgrade pip
-      pip install setuptools wheel
+      pip install --upgrade pip setuptools wheel
       pip install -r requirements.txt
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
     plan: free
