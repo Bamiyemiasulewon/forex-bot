@@ -2,7 +2,8 @@ services:
   - type: web
     name: forex-bot
     env: python
-    rootDir: .
+    pythonVersion: "3.8"
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT" 
