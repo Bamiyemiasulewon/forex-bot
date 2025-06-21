@@ -1,3 +1,5 @@
+setuptools>=68.0.0
+wheel>=0.40.0
 annotated-types==0.7.0
 anyio==4.5.2
 attrs==19.3.0
@@ -32,7 +34,6 @@ MarkupSafe==1.1.0
 more-itertools==4.2.0
 numpy>=1.26.0
 oauthlib==3.1.0
-pandas==2.0.3
 pexpect==4.6.0
 pyasn1==0.4.2
 pyasn1-modules==0.2.1
@@ -50,7 +51,6 @@ python-dateutil==2.9.0.post0
 python-dotenv
 python-jose==3.3.0
 python-multipart
-python-telegram-bot==21.6
 pytz==2025.2
 PyYAML==5.3.1
 requests==2.22.0
