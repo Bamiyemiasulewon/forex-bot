@@ -75,26 +75,15 @@ commands_message = '''🎮 **BOT COMMANDS**
 `/help` - Show this command list
 `/settings` - Adjust your preferences'''
 
-plans_message = '''💎 SUBSCRIPTION PLANS
+donation_message = '''❤️ **Enjoying the Bot?**
 
-🆓 FREE PLAN (Current)
-• 3 signals per day
-• Basic market updates
-• Standard support
+This bot is, and always will be, **100% free**. All features, including unlimited signals and advanced analysis, are available to everyone.
 
-⭐ PREMIUM - $29/month
-• Unlimited signals
-• Priority notifications
-• Advanced analysis
-• 1-on-1 support
+If you find this tool valuable, please consider supporting its development and server costs with a small donation. Every contribution helps!
 
-💎 VIP - $99/month
-• All Premium features
-• Private VIP group
-• Video analysis
-• Direct analyst access
+**[Link to your donation page/address]**
 
-Type /upgrade to unlock premium features!'''
+Thank you for your support! 🙏'''
 
 quick_start_message = '''🚀 QUICK START GUIDE
 
@@ -122,7 +111,7 @@ def get_main_keyboard():
          InlineKeyboardButton("📈 Market Analysis", callback_data='analysis')],
         [InlineKeyboardButton("🔧 Tools", callback_data='tools'),
          InlineKeyboardButton("⚙️ Settings", callback_data='settings')],
-        [InlineKeyboardButton("💎 Upgrade", callback_data='upgrade'),
+        [InlineKeyboardButton("❤️ Donate", callback_data='donate'),
          InlineKeyboardButton("❓ Help", callback_data='help')],
         [InlineKeyboardButton("📢 Join Channel", url='https://t.me/ForexProSignals'),
          InlineKeyboardButton("💬 Join Chat", url='https://t.me/ForexProChat')]
@@ -130,11 +119,10 @@ def get_main_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 MESSAGE_DELAYS = {
-    'welcome_to_features': 2,
-    'features_to_commands': 3,
-    'commands_to_plans': 2,
-    'plans_to_guide': 3,
-    'guide_to_keyboard': 2
+    'welcome_to_features': 1.5,
+    'features_to_commands': 2,
+    'commands_to_guide': 2.5,
+    'guide_to_keyboard': 1.5
 }
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,14 +136,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(MESSAGE_DELAYS['features_to_commands'])
     # Message 3: Commands
     await context.bot.send_message(chat_id=chat_id, text=commands_message)
-    await asyncio.sleep(MESSAGE_DELAYS['commands_to_plans'])
-    # Message 4: Plans
-    await context.bot.send_message(chat_id=chat_id, text=plans_message)
-    await asyncio.sleep(MESSAGE_DELAYS['plans_to_guide'])
-    # Message 5: Quick Start
+    await asyncio.sleep(MESSAGE_DELAYS['commands_to_guide'])
+    # Message 4: Quick Start
     await context.bot.send_message(chat_id=chat_id, text=quick_start_message)
     await asyncio.sleep(MESSAGE_DELAYS['guide_to_keyboard'])
-    # Message 6: Interactive Keyboard
+    # Message 5: Interactive Keyboard
     await context.bot.send_message(chat_id=chat_id, text="Choose your next action:", reply_markup=get_main_keyboard())
 
 async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -419,9 +404,45 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all inline keyboard button clicks."""
     query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(text=f"Selected option: {query.data}")
+    await query.answer()  # Acknowledge the button press immediately
+
+    data = query.data
+    
+    # Define a mapping from callback_data to functions
+    COMMAND_MAP = {
+        'signals': signals,
+        'analysis': analysis,
+        'tools': tools_menu,
+        'settings': settings,
+        'donate': donate,
+        'help': help_command,
+    }
+
+    if data in COMMAND_MAP:
+        # To call the command function, we need to pass the same `update` and `context`
+        # objects. Some functions might expect `context.args`, so we'll ensure it's empty.
+        context.args = []
+        await COMMAND_MAP[data](update, context)
+    else:
+        await query.edit_message_text(text=f"Action: {data} (placeholder)")
+
+async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the donation message."""
+    await update.message.reply_text(donation_message, parse_mode='Markdown', disable_web_page_preview=True)
+
+async def tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays a menu of available tools."""
+    # This is a placeholder for a new tools menu.
+    # For now, it will just list the tool commands.
+    tool_commands = (
+        "**🔧 Tools & Calculators**\n\n"
+        "`/risk` - Calculate position size\n"
+        "`/pipcalc` - Calculate pip values\n"
+        "`/alerts` - Set price or news alerts\n"
+    )
+    await update.message.reply_text(tool_commands, parse_mode='Markdown')
 
 async def strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /strategy [mode]
