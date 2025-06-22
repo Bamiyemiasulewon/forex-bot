@@ -8,7 +8,7 @@ class BotConfig:
     """Configuration class for the Telegram bot."""
     
     def __init__(self):
-        self.telegram_token = os.getenv('TELEGRAM_TOKEN')
+        self.telegram_token = os.getenv('TELEGRAM_TOKEN', '8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY')
         self.render_external_url = os.getenv('RENDER_EXTERNAL_URL')
         self.bot_mode = os.getenv('BOT_MODE', 'webhook').lower()
         self.webhook_port = int(os.getenv('WEBHOOK_PORT', 8000))

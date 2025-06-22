@@ -39,6 +39,9 @@ class BotManager:
             return False
         
         try:
+            # Initialize the application before setting the webhook
+            await self.application.initialize()
+
             webhook_url = config.webhook_url
             if not webhook_url:
                 logger.error("Webhook URL not available")
