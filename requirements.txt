@@ -29,4 +29,4 @@ requests
 httpx
 
 # Additional dependencies
-alpha-vantage
+# alpha-vantage # No longer needed

@@ -39,7 +39,7 @@ app/
 3. Run database migrations with Alembic.
 4. Start the FastAPI server:
    ```bash
-   uvicorn app.main:app --reload
+   gunicorn -w 4 -k uvicorn.workers.UvicornWorker app.main:app
    ```
 5. Start Celery worker:
    ```bash
@@ -48,4 +48,20 @@ app/
 6. Set up and start the Telegram bot.
 
 ## License
+MIT 
+
+### Environment Variables
+
+To run this application, you will need to set the following environment variables. You can create a `.env` file in the root directory to manage these locally.
+
+- `TELEGRAM_TOKEN`: Your secret token from Telegram's BotFather.
+- `EXCHANGERATE_API_KEY`: A free API key from [ExchangeRate-API.com](https://www.exchangerate-api.com/) required for calculator commands.
+- `RENDER_EXTERNAL_URL` (for production): The public URL of your deployed application on a service like Render. If this is set, the bot will run in webhook mode. Otherwise, it defaults to polling.
+- `DATABASE_URL` (optional): The connection string for your database (e.g., `postgresql://...`). Defaults to a local SQLite database (`sqlite:///./forex_bot.db`).
+
+## Deployment
+
+This application is designed to be deployed on [Render](https://render.com/). Please see the detailed `DEPLOYMENT.md` file for step-by-step instructions.
+
+## Contributing
 MIT 
