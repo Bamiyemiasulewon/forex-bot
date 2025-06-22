@@ -1,6 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[cod]
+*.pyc[cod]
 *$py.class
 
 # C extensions
@@ -20,7 +20,6 @@ parts/
 sdist/
 var/
 wheels/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -46,10 +45,8 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
-*.py,cover
 .hypothesis/
 .pytest_cache/
-cover/
 
 # Translations
 *.mo
@@ -59,7 +56,6 @@ cover/
 *.log
 local_settings.py
 db.sqlite3
-db.sqlite3-journal
 
 # Flask stuff:
 instance/
@@ -84,19 +80,8 @@ ipython_config.py
 # pyenv
 .python-version
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-# Pipfile.lock
-
-# PEP 582; used by PDM, PEP 582 pollutes the project root
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
+# celery
+celerybeat-schedule.*
 
 # SageMath parsed files
 *.sage.py
@@ -107,14 +92,12 @@ celerybeat.pid
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
-test_venv/
-update_venv/
+env.bak
+venv.bak
 
 # Spyder project settings
 .spyderproject
-.spyproject
+.spyderworkspace
 
 # Rope project settings
 .ropeproject
@@ -127,11 +110,6 @@ update_venv/
 .dmypy.json
 dmypy.json
 
-# Databases
-*.db
-*.sqlite
-*.sqlite3
-
 # Pyre type checker
 .pyre/
 
@@ -140,9 +118,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
-
-# Environment
-.env
 
 # IDE and cache files
 .vscode/

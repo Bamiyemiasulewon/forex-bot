@@ -30,5 +30,4 @@ httpx
 
 # Additional dependencies
 # alpha-vantage # No longer needed
-yfinance
 # feedparser # Temporarily disabled due to installation issues

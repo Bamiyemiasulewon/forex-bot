@@ -6,7 +6,7 @@ A production-ready, fully automated Forex trading bot that generates profitable 
 - **Framework:** FastAPI (APIs), python-telegram-bot (async)
 - **Database:** PostgreSQL + SQLAlchemy ORM + Redis (caching/queues)
 - **Background Tasks:** Celery + Redis, asyncio
-- **Data APIs:** ccxt, yfinance, Alpha Vantage
+- **Data APIs:** ccxt, Alpha Vantage
 - **Trading:** pandas, numpy, ta-lib, custom strategies
 - **Testing:** pytest
 

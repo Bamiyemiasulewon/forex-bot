@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 
 from app.services.market_service import market_service
 from app.services.risk_service import risk_service
-from app.services.signal_service import signal_service
+from app.services.signal_service import SignalService, get_signal_service
 from app.services.database_service import get_db, User, Trade
 from sqlalchemy.orm import Session
 
@@ -12,21 +12,12 @@ router = APIRouter(prefix="/api")
 
 # --- Signal Endpoints ---
 @router.get("/signals", response_model=List[Dict])
-async def get_trading_signals():
+async def get_trading_signals(signal_service: SignalService = Depends(get_signal_service)):
     """Generate and return AI trading signals."""
     signals = signal_service.generate_signals()
     if not signals:
         raise HTTPException(status_code=404, detail="No signals available at the moment.")
     return signals
-
-# --- Market Data Endpoints ---
-@router.get("/market/{pair}", response_model=Dict)
-async def get_market_data(pair: str):
-    """Fetch real-time market data for a given pair."""
-    data = await market_service.get_market_data(pair)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Market data for {pair} not found.")
-    return data
 
 # --- Calculator Endpoints ---
 @router.get("/pipcalc/{pair}/{trade_size}")

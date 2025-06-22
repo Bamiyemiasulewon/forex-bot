@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from app.utils.indicators import calculate_rsi, calculate_macd
 from datetime import datetime
 from typing import List, Dict
+from fastapi import Depends
+from app.services.database_service import get_db
 
 class SignalService:
     def __init__(self, db: Session):
@@ -69,5 +71,5 @@ class SignalService:
         ]
         return signals
 
-# Singleton instance
-signal_service = SignalService() 
+def get_signal_service(db: Session = Depends(get_db)) -> SignalService:
+    return SignalService(db) 

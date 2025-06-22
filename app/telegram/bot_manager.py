@@ -82,7 +82,7 @@ class BotManager:
             # Start polling
             await self.application.initialize()
             await self.application.start()
-            await self.application.updater.start_polling()
+            await self.application.updater.start_polling(read_timeout=30)
             
             self._is_running = True
             logger.info("Bot started in polling mode successfully")

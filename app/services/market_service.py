@@ -1,7 +1,6 @@
 import httpx
 import logging
 import time
-import yfinance as yf
 from typing import Optional, Dict, Any
 from app.utils.config import config
 
@@ -93,39 +92,6 @@ class MarketService:
             return None
             
         return pip_value_in_quote * conversion_rate
-
-    async def get_market_data(self, pair: str) -> Optional[Dict]:
-        """Fetches detailed market data for a pair using yfinance."""
-        cache_key = f"market_data_{pair}"
-        cached_data = self._get_from_cache(cache_key)
-        if cached_data:
-            return cached_data
-
-        try:
-            ticker_pair = f"{pair.upper()}=X"
-            ticker = yf.Ticker(ticker_pair)
-            info = ticker.info
-
-            price = info.get('regularMarketPrice') or info.get('previousClose')
-            if not price:
-                 logger.warning(f"yfinance data for {pair} is missing price. Data: {info}")
-                 return None
-
-            data = {
-                'price': price,
-                'high': info.get('dayHigh'),
-                'low': info.get('dayLow'),
-                'open': info.get('regularMarketOpen'),
-                'high_52wk': info.get('fiftyTwoWeekHigh'),
-                'low_52wk': info.get('fiftyTwoWeekLow'),
-                'volume': info.get('regularMarketVolume', 0),
-                'pair': pair
-            }
-            self._set_in_cache(cache_key, data)
-            return data
-        except Exception as e:
-            logger.error(f"yfinance error fetching market data for {pair}: {e}", exc_info=True)
-            return None
 
 # Singleton instance
 market_service = MarketService() 
