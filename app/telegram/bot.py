@@ -50,24 +50,26 @@ features_message = '''⚡ KEY FEATURES
 • Stop loss suggestions
 • Portfolio tracking'''
 
-commands_message = '''🎮 BOT COMMANDS
+commands_message = '''🎮 **BOT COMMANDS**
 
-📈 TRADING:
-/signals - Latest forex signals
-/analysis - Market analysis
-/pair [EURUSD] - Specific pair info
-/performance - Bot statistics
+**Trading & Analysis**
+`/signals` - Get the latest forex signals
+`/market` - View live market data
+`/analysis [PAIR]` - Technical analysis for a pair
+`/news` - Fetch latest forex news
+`/calendar` - View economic event calendar
+`/trades` - View your open/closed trades
 
-🔧 TOOLS:
-/risk - Position calculator
-/news - Economic calendar
-/strength - Currency meter
-/alerts - Price notifications
+**Calculators & Tools**
+`/risk` - Calculate position size
+`/pipcalc` - Calculate pip values
+`/alerts` - Set price or news alerts
 
-⚙️ SETTINGS:
-/notifications - Alert preferences
-/timezone - Set your timezone
-/help - Full command list'''
+**Information**
+`/strategies` - Learn about trading strategies
+`/performance` - View bot's performance stats
+`/help` - Show this command list
+`/settings` - Adjust your preferences'''
 
 plans_message = '''💎 SUBSCRIPTION PLANS
 
@@ -197,6 +199,70 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the help message with all available commands."""
     await update.message.reply_text(commands_message)
 
+async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for showing current market data."""
+    await update.message.reply_text(
+        "📈 **Market Data**\n\n"
+        "This command will display current bid/ask prices and daily changes for major forex pairs. (Implementation pending)"
+    )
+
+async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for providing currency pair analysis."""
+    pair = " ".join(context.args) if context.args else "EURUSD"
+    await update.message.reply_text(
+        f"🔍 **Analysis for {pair.upper()}**\n\n"
+        f"This command will provide technical and fundamental analysis for the specified pair. (Implementation pending)"
+    )
+
+async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for setting price or news alerts."""
+    await update.message.reply_text(
+        "🔔 **Set Alert**\n\n"
+        "This command will allow you to set price and news alerts (e.g., `/alerts USDJPY 150.00`). (Implementation pending)"
+    )
+
+async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for displaying trades."""
+    await update.message.reply_text(
+        "📋 **Open/Recent Trades**\n\n"
+        "This command will show your open and recent trades or allow you to log new trade ideas. (Implementation pending)"
+    )
+
+async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for showing the economic calendar."""
+    await update.message.reply_text(
+        "📅 **Economic Calendar**\n\n"
+        "This command will display upcoming high-impact economic events. (Implementation pending)"
+    )
+
+async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for calculating pip value."""
+    await update.message.reply_text(
+        "➗ **Pip Calculator**\n\n"
+        "This command will calculate pip value or profit/loss for a trade. (Implementation pending)"
+    )
+
+async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for describing trading strategies."""
+    await update.message.reply_text(
+        "💡 **Trading Strategies**\n\n"
+        "This command will provide information on various forex trading strategies. (Implementation pending)"
+    )
+
+async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for fetching forex news."""
+    await update.message.reply_text(
+        "📰 **Forex News**\n\n"
+        "This command will fetch the latest forex-related news headlines. (Implementation pending)"
+    )
+
+async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for calculating position size."""
+    await update.message.reply_text(
+        "🛡️ **Risk Calculator**\n\n"
+        "This command will calculate the appropriate position size based on your risk percentage and stop loss. (Implementation pending)"
+    )
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles regular text messages."""
     await update.message.reply_text(
@@ -242,11 +308,20 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('signals', signals))
-    app.add_handler(CommandHandler('analysis', analysis))
     app.add_handler(CommandHandler('performance', performance))
-    app.add_handler(CommandHandler('risk', risk))
-    app.add_handler(CommandHandler('alerts', alerts))
     app.add_handler(CommandHandler('settings', settings))
+
+    # New Forex Commands
+    app.add_handler(CommandHandler('market', market))
+    app.add_handler(CommandHandler('analysis', analysis))
+    app.add_handler(CommandHandler('alerts', alerts))
+    app.add_handler(CommandHandler('trades', trades))
+    app.add_handler(CommandHandler('calendar', calendar))
+    app.add_handler(CommandHandler('pipcalc', pipcalc))
+    app.add_handler(CommandHandler('strategies', strategies))
+    app.add_handler(CommandHandler('risk', risk))
+
+    # Existing Commands
     app.add_handler(CommandHandler('strategy', strategy))
     app.add_handler(CommandHandler('ai_mode', ai_mode))
     app.add_handler(CommandHandler('correlation', correlation))
