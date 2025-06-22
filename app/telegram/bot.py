@@ -12,6 +12,9 @@ from telegram.ext import (
     filters as TFilters
 )
 from app.telegram.message_templates import format_signal_alert, format_performance, format_educational_tip
+from sqlalchemy.orm import Session
+from app.services.database_service import get_db, get_or_create_user
+from app.services.forex_api_service import forex_api_service
 
 logger = logging.getLogger(__name__)
 
@@ -200,11 +203,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(commands_message)
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for showing current market data."""
-    await update.message.reply_text(
-        "📈 **Market Data**\n\n"
-        "This command will display current bid/ask prices and daily changes for major forex pairs. (Implementation pending)"
-    )
+    """Shows current market data for major currency pairs."""
+    # In a real implementation, you would loop through a list of pairs
+    data = await forex_api_service.get_live_quote("EUR", "USD")
+    if data:
+        message = (
+            f"📈 **Market Data for {data['pair']}**\n\n"
+            f"Price: `{data['price']}`\n"
+            f"Change: `{data['change']}`"
+        )
+    else:
+        message = "Sorry, market data is currently unavailable."
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Placeholder for providing currency pair analysis."""
@@ -243,25 +253,26 @@ async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for describing trading strategies."""
-    await update.message.reply_text(
-        "💡 **Trading Strategies**\n\n"
-        "This command will provide information on various forex trading strategies. (Implementation pending)"
+    """Describes common forex trading strategies."""
+    message = (
+        "💡 **Common Forex Trading Strategies**\n\n"
+        "1️⃣ **Scalping**: Very short-term trades, holding for minutes, aiming for small profits.\n"
+        "2️⃣ **Day Trading**: Trades are opened and closed on the same day.\n"
+        "3️⃣ **Swing Trading**: Trades last for a few days, capturing 'swings' in the market.\n"
+        "4️⃣ **Position Trading**: Long-term trades, holding for weeks, months, or even years."
     )
+    await update.message.reply_text(message)
 
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for fetching forex news."""
-    await update.message.reply_text(
-        "📰 **Forex News**\n\n"
-        "This command will fetch the latest forex-related news headlines. (Implementation pending)"
-    )
-
-async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for calculating position size."""
-    await update.message.reply_text(
-        "🛡️ **Risk Calculator**\n\n"
-        "This command will calculate the appropriate position size based on your risk percentage and stop loss. (Implementation pending)"
-    )
+    """Fetches and displays recent forex-related news."""
+    news_items = await forex_api_service.get_forex_news()
+    if news_items:
+        message = "📰 **Latest Forex News**\n\n"
+        for item in news_items[:5]: # Show top 5
+            message += f"• {item['title']} - *{item['source']}*\n"
+    else:
+        message = "Sorry, could not fetch forex news at this time."
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles regular text messages."""

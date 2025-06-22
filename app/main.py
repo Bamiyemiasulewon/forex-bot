@@ -7,6 +7,7 @@ from app.api.telegram import router as telegram_router
 from app.telegram.bot_manager import bot_manager
 from app.utils.config import config
 from app.utils.logging_config import setup_logging
+from app.services.database_service import create_db_and_tables
 
 # Setup logging
 setup_logging(log_level=config.get_log_level())
@@ -22,6 +23,10 @@ app = FastAPI(
 @app.on_event("startup")
 async def on_startup():
     """Application startup event handler."""
+    logger.info("Creating database and tables...")
+    create_db_and_tables()
+    logger.info("Database setup complete.")
+
     logger.info("Application starting up...")
     if config.is_polling_mode:
         logger.info("Starting bot in polling mode...")

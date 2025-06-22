@@ -127,6 +127,11 @@ update_venv/
 .dmypy.json
 dmypy.json
 
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
 # Pyre type checker
 .pyre/
 

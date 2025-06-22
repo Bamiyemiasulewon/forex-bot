@@ -10,7 +10,7 @@ bcrypt
 python-jose[cryptography]
 pydantic[email]
 Jinja2
-python-telegram-bot
+python-telegram-bot[ext]
 
 # Celery for background tasks
 celery
@@ -27,3 +27,6 @@ scikit-learn
 # HTTP client
 requests
 httpx
+
+# Additional dependencies
+alpha-vantage
