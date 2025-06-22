@@ -139,4 +139,17 @@ dmypy.json
 .pytype/
 
 # Cython debug symbols
-cython_debug/ 
+cython_debug/
+
+# Environment
+.env
+
+# IDE and cache files
+.vscode/
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+test_venv/
+update_venv/ 
