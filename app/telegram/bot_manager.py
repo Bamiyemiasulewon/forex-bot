@@ -12,6 +12,7 @@ class BotManager:
     def __init__(self):
         self.application: Optional[Application] = None
         self._is_running = False
+        self._is_starting = False
     
     async def initialize(self) -> bool:
         """Initialize the bot application."""
@@ -93,13 +94,25 @@ class BotManager:
     
     async def start(self) -> bool:
         """Start the bot in the appropriate mode."""
-        if not await self.initialize():
-            return False
-        
-        if config.is_webhook_mode:
-            return await self.start_webhook()
-        else:
-            return await self.start_polling()
+        if self._is_running or self._is_starting:
+            logger.warning("Bot start already in progress or completed, skipping.")
+            return True
+
+        self._is_starting = True
+
+        try:
+            if not await self.initialize():
+                return False
+            
+            if config.is_webhook_mode:
+                result = await self.start_webhook()
+            else:
+                result = await self.start_polling()
+            
+            # The `is_running` flag is set within start_webhook/start_polling
+            return result
+        finally:
+            self._is_starting = False
     
     async def stop(self):
         """Stop the bot."""

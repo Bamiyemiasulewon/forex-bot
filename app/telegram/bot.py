@@ -185,8 +185,18 @@ async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Placeholder: position size calculator
-    await update.message.reply_text('Risk calculator (placeholder).')
+    try:
+        args = context.args
+        if len(args) != 2:
+            await update.message.reply_text("Usage: /risk [risk%] [stop-loss pips]")
+            return
+        risk_percent, stop_loss_pips = float(args[0]), float(args[1])
+        account_balance = 10000  # Default or from user settings
+        pip_value = 10  # Hardcoded for simplicity (e.g., EUR/USD)
+        position_size = (account_balance * (risk_percent / 100)) / (stop_loss_pips * pip_value)
+        await update.message.reply_text(f"Position size: {position_size:.2f} lots")
+    except ValueError:
+        await update.message.reply_text("Invalid input! Use numbers, e.g., /risk 2 20")
 
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Placeholder: set custom price alerts
@@ -216,41 +226,22 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = "Sorry, market data is currently unavailable."
     await update.message.reply_text(message, parse_mode='Markdown')
 
-async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for providing currency pair analysis."""
-    pair = " ".join(context.args) if context.args else "EURUSD"
-    await update.message.reply_text(
-        f"🔍 **Analysis for {pair.upper()}**\n\n"
-        f"This command will provide technical and fundamental analysis for the specified pair. (Implementation pending)"
-    )
-
-async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for setting price or news alerts."""
-    await update.message.reply_text(
-        "🔔 **Set Alert**\n\n"
-        "This command will allow you to set price and news alerts (e.g., `/alerts USDJPY 150.00`). (Implementation pending)"
-    )
-
-async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for displaying trades."""
-    await update.message.reply_text(
-        "📋 **Open/Recent Trades**\n\n"
-        "This command will show your open and recent trades or allow you to log new trade ideas. (Implementation pending)"
-    )
-
 async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for showing the economic calendar."""
-    await update.message.reply_text(
-        "📅 **Economic Calendar**\n\n"
-        "This command will display upcoming high-impact economic events. (Implementation pending)"
-    )
+    # Placeholder: show economic event calendar
+    await update.message.reply_text('Economic event calendar (placeholder).')
 
 async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder for calculating pip value."""
-    await update.message.reply_text(
-        "➗ **Pip Calculator**\n\n"
-        "This command will calculate pip value or profit/loss for a trade. (Implementation pending)"
-    )
+    try:
+        args = context.args
+        if len(args) != 3:
+            await update.message.reply_text("Usage: /pipcalc [pair] [lot size] [pips]")
+            return
+        pair, lot_size, pips = args[0], float(args[1]), float(args[2])
+        pip_value = 10  # Hardcoded for simplicity
+        profit_loss = lot_size * pips * pip_value
+        await update.message.reply_text(f"Profit/Loss: ${profit_loss:.2f} for {pips} pips")
+    except ValueError:
+        await update.message.reply_text("Invalid input! Use /pipcalc EURUSD 1.0 50")
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Describes common forex trading strategies."""
