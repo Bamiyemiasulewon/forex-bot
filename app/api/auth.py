@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, status
-from app.models.user import User
+from app.services.database_service import User
 from app.utils.helpers import hash_password
 from app.utils.secrets import encrypt_secret, decrypt_secret
 from sqlalchemy.orm import Session
