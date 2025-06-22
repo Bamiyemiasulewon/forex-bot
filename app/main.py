@@ -28,7 +28,7 @@ async def on_startup():
     logger.info("Database setup complete.")
 
     logger.info("Application starting up...")
-    if config.is_polling_mode:
+    if config.bot_mode == "polling":
         logger.info("Starting bot in polling mode...")
         # Running polling in the background
         asyncio.create_task(bot_manager.start())
