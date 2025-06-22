@@ -1,6 +1,11 @@
 import logging
 import asyncio
+import sys
+import os
 from fastapi import FastAPI
+
+# Add project root to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.api.endpoints import router as api_router
 from app.api.telegram import router as telegram_router

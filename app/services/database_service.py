@@ -2,6 +2,7 @@ import os
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, DateTime, ForeignKey, func
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
+from contextlib import contextmanager
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./forex_bot.db")
 
@@ -66,6 +67,7 @@ class UserSettings(Base):
     user = relationship("User", back_populates="settings")
 
 
+@contextmanager
 def get_db():
     """Dependency to get a database session."""
     db = SessionLocal()
