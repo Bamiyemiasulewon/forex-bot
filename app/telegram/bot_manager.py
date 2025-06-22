@@ -78,9 +78,17 @@ class BotManager:
         
         try:
             logger.info("Starting polling mode")
-            
-            # Start polling
+
+            # Initialize before accessing bot attribute
             await self.application.initialize()
+            
+            # Check for and delete any existing webhook
+            webhook_info = await self.application.bot.get_webhook_info()
+            if webhook_info.url:
+                logger.info(f"Deleting existing webhook for {webhook_info.url}")
+                await self.application.bot.delete_webhook()
+
+            # Start polling
             await self.application.start()
             await self.application.updater.start_polling(read_timeout=30)
             
