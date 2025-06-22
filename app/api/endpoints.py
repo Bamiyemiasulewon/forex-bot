@@ -8,7 +8,7 @@ from app.services.database_service import get_db, User, Trade
 from sqlalchemy.orm import Session
 
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 # --- Signal Endpoints ---
 @router.get("/signals", response_model=List[Dict])
@@ -36,7 +36,7 @@ async def get_risk_calculation(pair: str, risk_percent: float, stop_loss_pips: f
     user = db.query(User).first()
     account_balance = user.account_balance if user else 10000.0 # Default balance
 
-    calculation = risk_service.calculate_position_size(
+    calculation = await risk_service.calculate_position_size(
         account_balance=account_balance,
         risk_percent=risk_percent,
         stop_loss_pips=stop_loss_pips,

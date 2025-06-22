@@ -9,7 +9,7 @@ class RiskService:
         self.correlation_limit = correlation_limit
         self.max_daily_loss = max_daily_loss
 
-    def calculate_position_size(
+    async def calculate_position_size(
         self,
         account_balance: float,
         risk_percent: float,
@@ -23,7 +23,7 @@ class RiskService:
             return {"error": "Account balance, risk percent, and stop-loss must be positive."}
 
         # 1 standard lot = 100,000 units
-        pip_value_per_lot = market_service.get_pip_value_in_usd(pair, 100000)
+        pip_value_per_lot = await market_service.get_pip_value_in_usd(pair, 100000)
 
         if pip_value_per_lot is None:
             return {"error": f"Could not calculate pip value for {pair}."}
