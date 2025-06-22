@@ -3,6 +3,7 @@ import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Application,
     ApplicationBuilder, 
     CommandHandler, 
     ContextTypes, 
@@ -13,8 +14,6 @@ from telegram.ext import (
 from app.telegram.message_templates import format_signal_alert, format_performance, format_educational_tip
 
 logger = logging.getLogger(__name__)
-
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 
 # Message templates
 welcome_message = '''🤖 Welcome to ProfitPro Bot!
@@ -234,27 +233,10 @@ async def pair_strength(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def session_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Current trading session: London (placeholder).')
 
-# Placeholder for sending signal alerts
-def send_signal_alert(chat_id, message):
-    # To be implemented: send message to user
-    pass
-
-if TELEGRAM_TOKEN:
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-else:
-    logger.critical("TELEGRAM_TOKEN environment variable not set! The bot will not work.")
-    application = None
-
-async def handle_update(update: dict):
-    """Handles incoming Telegram updates."""
-    if not application:
-        logger.error("Application not initialized, cannot handle update.")
-        return
-    await application.update_queue.put(Update.de_json(update, application.bot))
-
-def setup_handlers(app):
+def setup_handlers(app: Application):
+    """Sets up all the command and message handlers for the bot."""
     if not app:
-        logger.warning("Application not initialized, skipping handler setup.")
+        logger.warning("Application object is None, skipping handler setup.")
         return
         
     app.add_handler(CommandHandler('start', start))
@@ -274,7 +256,4 @@ def setup_handlers(app):
     app.add_handler(CommandHandler('pair_strength', pair_strength))
     app.add_handler(CommandHandler('session_info', session_info))
     app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(TFilters.TEXT & ~TFilters.COMMAND, handle_text_message))
-
-if application:
-    setup_handlers(application) 
+    app.add_handler(MessageHandler(TFilters.TEXT & ~TFilters.COMMAND, handle_text_message)) 
