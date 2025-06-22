@@ -10,7 +10,7 @@ from app.utils.logging_config import setup_logging
 from app.services.database_service import create_db_and_tables
 
 # Setup logging
-setup_logging(log_level=config.get_log_level())
+setup_logging(log_level=config.log_level)
 
 logger = logging.getLogger(__name__)
 

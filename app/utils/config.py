@@ -1,5 +1,6 @@
 import os
 import logging
+from typing import Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 class Config:
     # Core
     debug: bool = os.getenv("DEBUG", "False").lower() in ("true", "1")
+    log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
     # Telegram
     telegram_token: str = os.getenv("TELEGRAM_TOKEN")
@@ -17,18 +19,18 @@ class Config:
         raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
     # Webhook vs Polling
-    render_external_url: str | None = os.getenv("RENDER_EXTERNAL_URL")
+    render_external_url: Optional[str] = os.getenv("RENDER_EXTERNAL_URL")
     is_webhook_mode: bool = bool(render_external_url)
     
     webhook_path: str = "/telegram/webhook"
-    webhook_url: str | None = f"{render_external_url}{webhook_path}" if render_external_url else None
+    webhook_url: Optional[str] = f"{render_external_url}{webhook_path}" if render_external_url else None
     bot_mode: str = "webhook" if is_webhook_mode else "polling"
     
     # Database
     db_url: str = os.getenv("DATABASE_URL", "sqlite:///./forex_bot.db")
 
     # API Keys
-    exchangerate_api_key: str | None = os.getenv("EXCHANGERATE_API_KEY")
+    exchangerate_api_key: Optional[str] = os.getenv("EXCHANGERATE_API_KEY")
 
     # Celery
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
