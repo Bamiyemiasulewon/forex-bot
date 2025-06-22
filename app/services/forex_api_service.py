@@ -1,7 +1,8 @@
 import httpx
 import logging
 import time
-from typing import Optional
+import yfinance as yf
+from typing import Optional, Dict
 from app.utils.config import config
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,74 @@ class ForexAPIService:
             return None
             
         return pip_value_in_quote_currency * conversion_rate
+
+    async def get_current_price(self, pair: str) -> Optional[float]:
+        """Fetches the current market price for a pair using yfinance."""
+        cache_key = f"price_{pair}"
+        cached_price = self._get_from_cache(cache_key)
+        if cached_price:
+            return cached_price
+
+        try:
+            ticker_pair = f"{pair.upper()}=X"
+            ticker = yf.Ticker(ticker_pair)
+            
+            # Use 'regularMarketPrice' or 'previousClose' for robust fetching
+            data = ticker.info
+            price = data.get('regularMarketPrice') or data.get('previousClose')
+
+            if price:
+                self._set_in_cache(cache_key, price)
+                logger.info(f"Fetched price for {pair}: {price}")
+                return price
+            else:
+                logger.warning(f"Could not fetch current price for {pair} from yfinance. Data: {data}")
+                return None
+        except Exception as e:
+            logger.error(f"yfinance error fetching price for {pair}: {e}", exc_info=True)
+            return None
+
+    async def get_market_data(self, pair: str) -> Optional[Dict]:
+        """Fetches detailed market data for a pair using yfinance."""
+        cache_key = f"market_data_{pair}"
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data:
+            return cached_data
+
+        try:
+            ticker_pair = f"{pair.upper()}=X"
+            ticker = yf.Ticker(ticker_pair)
+            info = ticker.info
+
+            required_keys = ['regularMarketPrice', 'dayHigh', 'dayLow', 'regularMarketOpen', 'fiftyTwoWeekHigh', 'fiftyTwoWeekLow']
+            if not all(key in info for key in required_keys):
+                logger.warning(f"yfinance data for {pair} is missing key fields. Available data: {info.keys()}")
+                # Fallback for missing data
+                return {
+                    'price': info.get('regularMarketPrice') or info.get('previousClose'),
+                    'high': info.get('dayHigh'),
+                    'low': 'dayLow',
+                    'open': info.get('regularMarketOpen'),
+                    'high_52wk': info.get('fiftyTwoWeekHigh'),
+                    'low_52wk': info.get('fiftyTwoWeekLow'),
+                    'volume': info.get('regularMarketVolume', 0),
+                    'pair': pair
+                }
+
+            self._set_in_cache(cache_key, info)
+            return {
+                'price': info['regularMarketPrice'],
+                'high': info['dayHigh'],
+                'low': info['dayLow'],
+                'open': info['regularMarketOpen'],
+                'high_52wk': info['fiftyTwoWeekHigh'],
+                'low_52wk': info['fiftyTwoWeekLow'],
+                'volume': info.get('regularMarketVolume', 0),
+                'pair': pair
+            }
+        except Exception as e:
+            logger.error(f"yfinance error fetching market data for {pair}: {e}", exc_info=True)
+            return None
 
 
 # Initialize the service with the key from config

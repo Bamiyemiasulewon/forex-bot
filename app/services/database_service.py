@@ -23,6 +23,7 @@ class User(Base):
     username = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     is_premium = Column(Boolean, default=False)
+    account_balance = Column(Float, default=10000.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     trades = relationship("Trade", back_populates="user")

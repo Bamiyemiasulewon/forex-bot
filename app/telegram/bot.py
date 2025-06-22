@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import feedparser
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -159,23 +160,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the user's open and closed trades."""
-    # This is a mock implementation. In a real application, you would fetch this from the database.
-    # For example:
-    # with get_db() as db:
-    #     user = get_or_create_user(db, update.effective_user.id)
-    #     trades_data = db.query(Trade).filter(Trade.user_id == user.id).all()
+    with get_db() as db:
+        user = get_or_create_user(db, update.effective_user.id)
+        trades_data = db.query(Trade).filter(Trade.user_id == user.id).order_by(Trade.created_at.desc()).limit(20).all()
     
-    trades_data = [
-        {"pair": "EUR/USD", "lots": 1.0, "open_price": 1.0900, "status": "open"},
-        {"pair": "GBP/JPY", "lots": 0.5, "open_price": 198.50, "status": "closed"}
-    ]
     if not trades_data:
-        response = "No trades found."
+        response = "📊 **Your Trades**\n\nYou have no trades yet. Use `/signals` to find opportunities!"
     else:
-        response_lines = []
+        open_trades = []
+        closed_trades = []
         for t in trades_data:
-            response_lines.append(f"🔹 {t['status'].title()}: {t['pair']}, {t['lots']} lots @ {t['open_price']}")
-        response = "📊 **Your Trades**\n\n" + "\n".join(response_lines)
+            trade_line = f"🔹 **{t.symbol}** ({t.order_type.title()})\n" \
+                         f"   Entry: `{t.entry_price}` | SL: `{t.stop_loss}` | TP: `{t.take_profit}`"
+            if t.status == 'open':
+                open_trades.append(trade_line)
+            else:
+                pnl_str = f"| PnL: `${t.pnl:,.2f}`" if t.pnl is not None else ""
+                closed_trades.append(f"{trade_line}\n   Closed at `{t.close_price}` {pnl_str}")
+
+        response = "📊 **Your Trades**\n\n"
+        if open_trades:
+            response += "🔴 **Open Trades**\n" + "\n".join(open_trades) + "\n\n"
+        if closed_trades:
+            response += "🟢 **Closed Trades**\n" + "\n".join(closed_trades)
         
     await update.message.reply_text(response, parse_mode='Markdown')
 
@@ -193,8 +200,42 @@ async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Placeholder: send analysis for a pair
-    await update.message.reply_text('Analysis for requested pair (placeholder).')
+    """Provides a basic technical analysis for a given currency pair."""
+    if not context.args:
+        await update.message.reply_text("Please specify a currency pair. Example: `/analysis EURUSD`")
+        return
+
+    pair = context.args[0].upper()
+    data = await forex_api_service.get_market_data(pair)
+
+    if not data or not data.get('price'):
+        await update.message.reply_text(f"📉 Sorry, analysis for **{pair}** is currently unavailable. Please check the pair and try again.")
+        return
+
+    price = data['price']
+    open_price = data['open']
+    high = data['high']
+    low = data['low']
+
+    trend = "Sideways"
+    if price > open_price * 1.001:
+        trend = "Uptrend"
+    elif price < open_price * 0.999:
+        trend = "Downtrend"
+
+    response = (
+        f"📊 **Technical Analysis for {pair}**\n\n"
+        f"**Current Price:** `{price:,.5f}`\n\n"
+        f"**Session Analysis:**\n"
+        f"  - **Trend:** `{trend}`\n"
+        f"  - **Open:** `{open_price:,.5f}`\n"
+        f"  - **High:** `{high:,.5f}`\n"
+        f"  - **Low:** `{low:,.5f}`\n\n"
+        f"**Summary:**\n"
+        f"The market for {pair} is currently in a **{trend.lower()}** phase. "
+        f"The price is trading at `{price:,.5f}`, with a daily range between `{low:,.5f}` and `{high:,.5f}`."
+    )
+    await update.message.reply_text(response, parse_mode='Markdown')
 
 async def performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
@@ -218,10 +259,11 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Risk and stop-loss must be positive numbers.")
             return
 
-        account_balance = 10000  # Mock account balance
-        
-        # 1 standard lot = 100,000 units
-        pip_value_per_lot = await forex_api_service.get_pip_value_in_usd(pair, 100000)
+        with get_db() as db:
+            user = get_or_create_user(db, update.effective_user.id)
+            account_balance = user.account_balance  # Fetch real balance
+
+        pip_value_per_lot = await forex_api_service.get_pip_value_in_usd(pair, 100000) # 1 standard lot
 
         if pip_value_per_lot is None:
             await update.message.reply_text("❌ Could not calculate pip value. Please check the currency pair or try again later.")
@@ -236,7 +278,15 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         position_size_lots = risk_amount_usd / sl_cost_per_lot
         
-        await update.message.reply_text(f"🛡️ For a ${account_balance:,.2f} account, risking {risk_percent}% on {pair} with a {stop_loss_pips} pip SL:\n\n**Position Size**: `{position_size_lots:.2f}` lots")
+        response = (
+            f"🛡️ **Risk Calculation**\n\n"
+            f"💰 Account Balance: `${account_balance:,.2f}`\n"
+            f"📈 Risk: `{risk_percent}%` (${risk_amount_usd:,.2f})\n"
+            f"📉 Stop-Loss: `{stop_loss_pips}` pips\n\n"
+            f"**Recommended Position Size for {pair}:**\n"
+            f"✅ **`{position_size_lots:.2f}` lots**"
+        )
+        await update.message.reply_text(response, parse_mode='Markdown')
 
     except ValueError:
         await update.message.reply_text("❌ Invalid input. Please use numbers for risk and stop-loss.\n\nExample: `/risk EURUSD 2 20`")
@@ -259,55 +309,70 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(commands_message, parse_mode='Markdown')
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows current market data for major currency pairs."""
-    pair = "EURUSD"
-    if context.args:
-        pair = context.args[0].upper()
-
-    if len(pair) != 6:
-        await update.message.reply_text("❌ Invalid pair format. Please use a 6-letter pair like `EURUSD`.", parse_mode='Markdown')
+    """Fetches and displays live market data for a given currency pair."""
+    if not context.args:
+        await update.message.reply_text("Please specify a currency pair. Example: `/market EURUSD`")
         return
 
-    base_curr = pair[:3]
-    quote_curr = pair[3:]
+    pair = context.args[0].upper()
+    data = await forex_api_service.get_market_data(pair)
     
-    rate = await forex_api_service.get_exchange_rate(base_curr, quote_curr)
-    
-    if rate:
-        message = (
-            f"📈 **Market Data for {base_curr}/{quote_curr}**\n\n"
-            f"Current Price: `{rate:.5f}`"
-        )
-    else:
-        message = f"Sorry, market data for {pair} is currently unavailable."
-    await update.message.reply_text(message, parse_mode='Markdown')
+    if not data or not data.get('price'):
+        await update.message.reply_text(f"📉 Sorry, market data for **{pair}** is currently unavailable. Please check the pair and try again.")
+        return
+
+    response = (
+        f"📈 **Market Data for {data['pair']}**\n\n"
+        f"**Price:** `{data['price']:,.5f}`\n"
+        f"**Open:** `{data['open']:,.5f}`\n"
+        f"**Day's High:** `{data['high']:,.5f}`\n"
+        f"**Day's Low:** `{data['low']:,.5f}`\n"
+        f"**Volume:** `{data['volume']:,}`\n\n"
+        f"**52-Week Range:**\n`{data['low_52wk']:,.5f}` - `{data['high_52wk']:,.5f}`"
+    )
+        
+    await update.message.reply_text(response, parse_mode='Markdown')
 
 async def calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Placeholder: show economic event calendar
-    await update.message.reply_text('Economic event calendar (placeholder).')
+    await update.message.reply_text('📅 Economic calendar feature is coming soon! It will include events from major economies.')
 
 async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Calculates profit/loss for a trade."""
+    """Calculates the value of pips for a given pair and lot size."""
     try:
         if len(context.args) != 3:
             await update.message.reply_text("❌ Invalid format. Use: `/pipcalc [pair] [lot size] [pips]`\n\nExample: `/pipcalc EURUSD 1.0 50`")
             return
-            
-        pair, lot_size_str, pips_str = context.args[0].upper(), context.args[1], context.args[2]
-        lot_size, pips = float(lot_size_str), float(pips_str)
 
-        # 1 standard lot = 100,000 units of base currency
-        units = lot_size * 100000
-        
-        pip_value_usd = await forex_api_service.get_pip_value_in_usd(pair, units)
+        pair, lot_size_str, pips_str = context.args[0].upper(), context.args[1], context.args[2]
+        lot_size = float(lot_size_str)
+        pips = float(pips_str)
+
+        if lot_size <= 0 or pips <= 0:
+            await update.message.reply_text("❌ Lot size and pips must be positive numbers.")
+            return
+
+        # lot_size is in lots, convert to currency units (1 lot = 100,000 units)
+        trade_size_units = lot_size * 100000
+
+        pip_value_usd = await forex_api_service.get_pip_value_in_usd(pair, trade_size_units)
 
         if pip_value_usd is None:
             await update.message.reply_text("❌ Could not calculate pip value. Please check the currency pair or try again later.")
             return
-            
-        profit_loss = pips * pip_value_usd
         
-        await update.message.reply_text(f"💰 For a trade of **{lot_size} lots** on **{pair}**:\n\n*A* **{pips} pip** *move would result in a P/L of* **`${profit_loss:,.2f}`**", parse_mode='Markdown')
+        total_value = pip_value_usd * pips
+        
+        response = (
+            f"🧮 **Pip Value Calculation**\n\n"
+            f"PAIR: `{pair}`\n"
+            f"LOT SIZE: `{lot_size}`\n"
+            f"PIPS: `{pips}`\n\n"
+            f"Pip Value (1 pip): **${pip_value_usd / lot_size:.5f}** per mini lot (0.1)\n"
+            f"Total Value: **${total_value:,.2f}** for `{pips}` pips"
+        )
+
+        await update.message.reply_text(response, parse_mode='Markdown')
 
     except ValueError:
         await update.message.reply_text("❌ Invalid input. Please use numbers for lot size and pips.\n\nExample: `/pipcalc EURUSD 1.0 50`")
@@ -316,26 +381,36 @@ async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("An error occurred. Please try again later.")
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Describes common forex trading strategies."""
-    message = (
-        "💡 **Common Forex Trading Strategies**\n\n"
-        "1️⃣ **Scalping**: Very short-term trades, holding for minutes, aiming for small profits.\n"
-        "2️⃣ **Day Trading**: Trades are opened and closed on the same day.\n"
-        "3️⃣ **Swing Trading**: Trades last for a few days, capturing 'swings' in the market.\n"
-        "4️⃣ **Position Trading**: Long-term trades, holding for weeks, months, or even years."
+    # Placeholder: explain trading strategies
+    response = (
+        "📈 **Trading Strategies**\n\n"
+        "This bot uses a combination of strategies to generate signals:\n\n"
+        "1.  **Trend Following:** Identifies and follows the dominant market trend using moving averages.\n"
+        "2.  **Mean Reversion:** Looks for prices to return to their historical average.\n"
+        "3.  **Breakout:** Enters the market when the price moves beyond a defined support or resistance level.\n\n"
+        "Each signal specifies the strategy used."
     )
-    await update.message.reply_text(message)
+    await update.message.reply_text(response)
 
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetches and displays recent forex-related news."""
-    news_items = await forex_api_service.get_forex_news()
-    if news_items:
-        message = "📰 **Latest Forex News**\n\n"
-        for item in news_items[:5]: # Show top 5
-            message += f"• {item['title']} - *{item['source']}*\n"
-    else:
-        message = "Sorry, could not fetch forex news at this time."
-    await update.message.reply_text(message, parse_mode='Markdown')
+    """Fetches the latest forex news from an RSS feed."""
+    try:
+        # Using DailyFX RSS feed as an example
+        feed_url = "https://www.dailyfx.com/feeds/forex-news"
+        feed = feedparser.parse(feed_url)
+        
+        if not feed.entries:
+            await update.message.reply_text("Couldn't fetch forex news at the moment. Please try again later.")
+            return
+
+        response = "📰 **Latest Forex News**\n\n"
+        for entry in feed.entries[:5]: # Get latest 5 articles
+            response += f"▪️ <a href='{entry.link}'>{entry.title}</a>\n"
+        
+        await update.message.reply_text(response, parse_mode='HTML', disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Error fetching news: {e}")
+        await update.message.reply_text("An error occurred while fetching the news.")
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles regular text messages."""
