@@ -20,7 +20,8 @@ class Config:
     render_external_url: str | None = os.getenv("RENDER_EXTERNAL_URL")
     is_webhook_mode: bool = bool(render_external_url)
     
-    webhook_url: str | None = f"{render_external_url}/telegram/webhook" if render_external_url else None
+    webhook_path: str = "/telegram/webhook"
+    webhook_url: str | None = f"{render_external_url}{webhook_path}" if render_external_url else None
     bot_mode: str = "webhook" if is_webhook_mode else "polling"
     
     # Database
