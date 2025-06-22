@@ -33,7 +33,7 @@ class BotManager:
             return False
     
     async def start_webhook(self) -> bool:
-        """Start the bot in webhook mode."""
+        """Start the bot in webhook mode, checking if the webhook is already set."""
         if not self.application:
             logger.error("Application not initialized")
             return False
@@ -43,18 +43,27 @@ class BotManager:
             if not webhook_url:
                 logger.error("Webhook URL not available")
                 return False
+
+            # Check if the webhook is already set correctly
+            current_webhook_info = await self.application.bot.get_webhook_info()
+            if current_webhook_info and current_webhook_info.url == webhook_url:
+                logger.info(f"Webhook is already set to {webhook_url}. Skipping setup.")
+                self._is_running = True
+                return True
             
-            logger.info(f"Starting webhook mode on {webhook_url}")
+            logger.info(f"Attempting to set webhook to {webhook_url}")
             
             # Set webhook
-            await self.application.bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook set successfully to {webhook_url}")
-            
-            self._is_running = True
-            return True
+            if await self.application.bot.set_webhook(url=webhook_url):
+                logger.info(f"Webhook set successfully to {webhook_url}")
+                self._is_running = True
+                return True
+            else:
+                logger.error("The call to set_webhook returned False, indicating failure.")
+                return False
             
         except Exception as e:
-            logger.error(f"Failed to start webhook mode: {e}")
+            logger.error(f"Failed to start webhook mode: {e}", exc_info=config.debug)
             return False
     
     async def start_polling(self) -> bool:
