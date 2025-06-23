@@ -1,10 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Dict, Any
 
 from app.services.market_service import market_service
 from app.services.risk_service import risk_service
-from app.services.signal_service import SignalService, get_signal_service
-from app.services.database_service import get_db_dependency, User, Trade
+from app.services.signal_service import signal_service
+from app.services.database_service import get_db_dependency, User, Trade, UserSettings
 from sqlalchemy.orm import Session
 
 
@@ -12,34 +12,25 @@ router = APIRouter()
 
 # --- Signal Endpoints ---
 @router.get("/signals", response_model=List[Dict])
-async def get_trading_signals(signal_service: SignalService = Depends(get_signal_service)):
+async def get_trading_signals():
     """Generate and return AI trading signals."""
-    signals = signal_service.generate_signals()
-    if not signals:
-        raise HTTPException(status_code=404, detail="No signals available at the moment.")
-    return signals
+    try:
+        signals = await signal_service.generate_signals()
+        if not signals:
+            raise HTTPException(status_code=404, detail="No new trading signals found at the moment.")
+        return signals
+    except Exception as e:
+        # Log the exception for debugging
+        # logger.error(f"Failed to generate signals: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail="The signal generation service is temporarily unavailable. Please try again later.")
 
 # --- Market Data Endpoints ---
 @router.get("/market/{pair}", response_model=Dict)
 async def get_market_data(pair: str):
     """Fetch market data for a given pair."""
-    # Mock data since we removed yfinance
-    import random
-    from datetime import datetime
-    
-    base_price = 1.0850 if "EUR" in pair else 1.2500 if "GBP" in pair else 150.0 if "JPY" in pair else 1.0000
-    variation = random.uniform(-0.01, 0.01)
-    current_price = base_price + variation
-    
-    data = {
-        'pair': pair,
-        'price': round(current_price, 5),
-        'open': round(base_price, 5),
-        'high': round(current_price + 0.005, 5),
-        'low': round(current_price - 0.005, 5),
-        'volume': random.randint(1000, 10000),
-        'timestamp': datetime.now().isoformat()
-    }
+    data = await market_service.get_market_data(pair)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Market data for {pair} not found or pair is unsupported.")
     return data
 
 # --- Calculator Endpoints ---
@@ -101,3 +92,33 @@ async def get_trades(db: Session = Depends(get_db_dependency)):
     # This should be authenticated to get trades for a specific user.
     trades = db.query(Trade).order_by(Trade.created_at.desc()).limit(20).all()
     return trades 
+
+# --- User Balance Endpoint ---
+@router.get("/balance", response_model=Dict)
+async def get_user_balance(db: Session = Depends(get_db_dependency)):
+    # TODO: Replace with real authentication to get the current user
+    user = db.query(User).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"balance": user.account_balance, "currency": "USD"}
+
+# --- User Settings Endpoint ---
+@router.get("/settings", response_model=Dict)
+async def get_user_settings(telegram_id: int = Query(...), db: Session = Depends(get_db_dependency)):
+    # Fetch user by telegram_id
+    user = db.query(User).filter(User.telegram_id == telegram_id).first()
+    if not user or not user.settings:
+        raise HTTPException(status_code=404, detail="User settings not found.")
+    settings = user.settings
+    return {
+        "preferred_pairs": settings.preferred_pairs,
+        "default_risk": settings.default_risk
+    }
+
+# --- Help/Support Endpoint ---
+@router.get("/help", response_model=Dict)
+async def get_help(telegram_id: int = Query(...)):
+    # Optionally log or use telegram_id for support tracking
+    return {
+        "message": "For support, contact @YourSupportUsername or email support@example.com."
+    } 

@@ -4,6 +4,9 @@ from typing import Optional
 from telegram.ext import Application
 from app.utils.config import config
 
+from app.telegram.bot import setup_handlers
+from app.services.market_service import shutdown_event as shutdown_market_service
+
 logger = logging.getLogger(__name__)
 
 class BotManager:
@@ -19,11 +22,16 @@ class BotManager:
         try:
             logger.info(f"Initializing bot in {config.bot_mode} mode")
             
-            # Create application
-            self.application = Application.builder().token(config.telegram_token).build()
+            # Create application with increased connection timeouts
+            self.application = (
+                Application.builder()
+                .token(config.telegram_token)
+                .connect_timeout(30)
+                .pool_timeout(30)
+                .build()
+            )
             
             # Setup handlers
-            from app.telegram.bot import setup_handlers
             setup_handlers(self.application)
             
             logger.info("Bot application initialized successfully")
@@ -82,11 +90,28 @@ class BotManager:
             # Initialize before accessing bot attribute
             await self.application.initialize()
             
-            # Check for and delete any existing webhook
-            webhook_info = await self.application.bot.get_webhook_info()
-            if webhook_info.url:
-                logger.info(f"Deleting existing webhook for {webhook_info.url}")
-                await self.application.bot.delete_webhook()
+            # Force delete any existing webhook with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    webhook_info = await self.application.bot.get_webhook_info()
+                    if webhook_info.url:
+                        logger.info(f"Attempt {attempt + 1}: Deleting existing webhook for {webhook_info.url}")
+                        success = await self.application.bot.delete_webhook()
+                        if success:
+                            logger.info("Webhook deleted successfully")
+                            break
+                        else:
+                            logger.warning(f"Webhook deletion attempt {attempt + 1} failed")
+                    else:
+                        logger.info("No existing webhook found")
+                        break
+                except Exception as e:
+                    logger.warning(f"Webhook deletion attempt {attempt + 1} failed: {e}")
+                    if attempt == max_retries - 1:
+                        logger.error("Failed to delete webhook after all attempts")
+                        return False
+                    await asyncio.sleep(1)  # Wait before retry
 
             # Start polling
             await self.application.start()
@@ -128,16 +153,28 @@ class BotManager:
             return
         
         try:
+            # Always try to delete webhook to prevent conflicts
+            try:
+                webhook_info = await self.application.bot.get_webhook_info()
+                if webhook_info.url:
+                    logger.info(f"Deleting webhook: {webhook_info.url}")
+                    await self.application.bot.delete_webhook()
+                    logger.info("Webhook deleted successfully")
+            except Exception as e:
+                logger.warning(f"Error deleting webhook during shutdown: {e}")
+            
             if config.is_webhook_mode:
-                # Delete webhook
-                await self.application.bot.delete_webhook()
-                logger.info("Webhook deleted successfully")
+                # Webhook already deleted above
+                pass
             else:
                 # Stop polling
-                await self.application.updater.stop()
-                await self.application.stop()
-                await self.application.shutdown()
-                logger.info("Polling stopped successfully")
+                try:
+                    await self.application.updater.stop()
+                    await self.application.stop()
+                    await self.application.shutdown()
+                    logger.info("Polling stopped successfully")
+                except Exception as e:
+                    logger.warning(f"Error stopping polling: {e}")
             
             self._is_running = False
             
@@ -152,6 +189,32 @@ class BotManager:
     def get_application(self) -> Optional[Application]:
         """Get the bot application instance."""
         return self.application
+
+    def run(self):
+        """Starts the bot and blocks until interrupted."""
+        logger.info("Bot is starting...")
+        # Run the bot until the user presses Ctrl-C
+        self.application.run_polling()
+        logger.info("Bot has stopped.")
+
+    async def shutdown(self):
+        """Gracefully shuts down the bot and its resources."""
+        logger.info("Shutting down bot...")
+        # You might have other cleanup tasks here
+        await shutdown_market_service()
+        logger.info("Bot shutdown complete.")
+
+async def main():
+    """Main entry point for running the bot."""
+    bot_manager = BotManager()
+    
+    try:
+        bot_manager.run()
+    except (KeyboardInterrupt, SystemExit):
+        await bot_manager.shutdown()
+
+if __name__ == '__main__':
+    asyncio.run(main())
 
 # Global bot manager instance
 bot_manager = BotManager() 

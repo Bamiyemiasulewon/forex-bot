@@ -1,75 +1,159 @@
 import pandas as pd
-from app.models.signal import Signal
-from app.models.price_data import PriceData
-from sqlalchemy.orm import Session
-from app.utils.indicators import calculate_rsi, calculate_macd
-from datetime import datetime
-from typing import List, Dict
-from fastapi import Depends
-from app.services.database_service import get_db_dependency
+from app.utils.indicators import calculate_rsi
+from typing import List, Dict, Optional
+from app.services.market_service import market_service
+import asyncio
+import logging
+import httpx
+from app.utils.secrets import ALPHA_VANTAGE_API_KEY
+import time
+
+logger = logging.getLogger(__name__)
 
 class SignalService:
-    def __init__(self, db: Session):
-        self.db = db
-
-    def generate_signal(self, symbol: str):
-        prices = self.db.query(PriceData).filter(PriceData.symbol == symbol).order_by(PriceData.timestamp.desc()).limit(100).all()
-        if not prices:
-            return None
-        df = pd.DataFrame([{
-            'close': p.close,
-            'timestamp': p.timestamp
-        } for p in prices])
-        rsi = calculate_rsi(df['close'])
-        macd, signal_line = calculate_macd(df['close'])
-        # Example logic
-        if rsi[-1] < 30 and macd[-1] > signal_line[-1]:
-            signal_type = 'buy'
-            confidence = 0.8
-        elif rsi[-1] > 70 and macd[-1] < signal_line[-1]:
-            signal_type = 'sell'
-            confidence = 0.8
-        else:
-            signal_type = 'hold'
-            confidence = 0.5
-        signal = Signal(symbol=symbol, signal_type=signal_type, confidence=confidence)
-        self.db.add(signal)
-        self.db.commit()
-        return signal
-
-    def generate_signals(self) -> List[Dict]:
-        """
-        Generates a list of trading signals.
-        
-        This is a placeholder implementation. In a real application, this would
-        involve complex logic, data analysis, and potentially machine learning models.
-        """
-        # Mock data representing real signals
-        signals = [
-            {
-                "signal_id": "SIG_2847",
-                "pair": "EURUSD",
-                "strategy": "Trend Breakout",
-                "entry_range": "1.0850-1.0860",
-                "stop_loss": 1.0830,
-                "take_profit": 1.0900,
-                "risk_reward_ratio": "1:2.5",
-                "confidence": "87%",
-                "valid_for_hours": 4
-            },
-            {
-                "signal_id": "SIG_2848",
-                "pair": "GBPJPY",
-                "strategy": "Mean Reversion",
-                "entry_range": "198.20-198.30",
-                "stop_loss": 198.70,
-                "take_profit": 197.50,
-                "risk_reward_ratio": "1:1.4",
-                "confidence": "92%",
-                "valid_for_hours": 2
-            }
+    def __init__(self):
+        # Expanded list of major forex pairs to generate signals for (no slashes)
+        self.pairs_to_scan = [
+            "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
+            "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURCHF"
         ]
-        return signals
+        self.alpha_vantage_api_key = ALPHA_VANTAGE_API_KEY
+        self.base_url = "https://www.alphavantage.co/query"
+        self._last_signals_cache = None
+        self._last_signals_time = 0
+        self._lock = asyncio.Lock()  # For throttling and concurrency
 
-def get_signal_service(db: Session = Depends(get_db_dependency)) -> SignalService:
-    return SignalService(db) 
+    async def fetch_ohlcv(self, pair: str, interval: str = '60min', outputsize: str = 'compact') -> Optional[pd.DataFrame]:
+        """Fetch historical OHLCV data for a forex pair from Alpha Vantage."""
+        from_symbol, to_symbol = pair[:3], pair[3:]
+        params = {
+            "function": "FX_INTRADAY",
+            "from_symbol": from_symbol,
+            "to_symbol": to_symbol,
+            "interval": interval,
+            "outputsize": outputsize,
+            "apikey": self.alpha_vantage_api_key
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(self.base_url, params=params, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                # Alpha Vantage rate limit error detection
+                if any("Thank you for using Alpha Vantage" in str(v) for v in data.values()):
+                    logger.warning(f"Alpha Vantage rate limit hit for {pair}")
+                    raise RuntimeError("rate_limited")
+                time_series = data.get(f"Time Series FX ({interval})", {})
+                if not time_series:
+                    logger.warning(f"No OHLCV data for {pair}")
+                    return None
+                df = pd.DataFrame.from_dict(time_series, orient='index')
+                df = df.rename(columns={
+                    '1. open': 'open',
+                    '2. high': 'high',
+                    '3. low': 'low',
+                    '4. close': 'close'
+                })
+                df = df.astype(float)
+                df = df.sort_index()  # Oldest first
+                return df
+        except RuntimeError as e:
+            if str(e) == "rate_limited":
+                raise
+            logger.error(f"Error fetching OHLCV for {pair} from Alpha Vantage: {e}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching OHLCV for {pair} from Alpha Vantage: {e}", exc_info=True)
+            return None
+
+    async def generate_signals(self) -> List[Dict]:
+        """
+        Generates a list of real trading signals based on RSI.
+        Throttles requests to Alpha Vantage to 1 every 12 seconds (5 per minute).
+        Caches last successful signals as fallback if rate-limited.
+        """
+        async with self._lock:
+            now = time.time()
+            # If last signals were generated less than 12 seconds ago, return cached
+            if self._last_signals_cache and now - self._last_signals_time < 12:
+                logger.info("Returning cached signals due to throttling.")
+                return self._last_signals_cache
+            signals = []
+            for i, pair in enumerate(self.pairs_to_scan):
+                try:
+                    # Throttle: 1 request every 12 seconds
+                    if i > 0:
+                        await asyncio.sleep(12)
+                    signal = await self.analyze_pair_for_signal(pair)
+                    if signal:
+                        signals.append(signal)
+                except RuntimeError as e:
+                    if str(e) == "rate_limited":
+                        logger.warning("Alpha Vantage rate limit hit. Returning cached signals if available.")
+                        if self._last_signals_cache:
+                            return self._last_signals_cache
+                        else:
+                            raise
+                except Exception as e:
+                    logger.error(f"Error generating signal for {pair}: {e}", exc_info=True)
+            if signals:
+                self._last_signals_cache = signals
+                self._last_signals_time = time.time()
+            return signals
+
+    async def analyze_pair_for_signal(self, pair: str) -> Optional[Dict]:
+        """Analyzes a single pair and returns a signal if conditions are met."""
+        try:
+            # Fetch historical data (e.g., 1-hour timeframe for the last 100 hours)
+            df = await self.fetch_ohlcv(pair, interval='60min', outputsize='compact')
+            if df is None or len(df) < 14:
+                logger.info(f"Not enough historical data for {pair}, skipping.")
+                return None
+            # Calculate RSI
+            rsi = calculate_rsi(df['close'])
+            last_rsi = rsi.iloc[-1]
+            # Get current price for signal details
+            ticker = await market_service.get_market_data(pair)
+            if not ticker or not ticker.get('price'):
+                logger.warning(f"Could not fetch ticker data for {pair}, skipping.")
+                return None
+            current_price = ticker['price']
+            # Dynamic stop-loss based on recent volatility (e.g., Average True Range)
+            df['tr'] = pd.DataFrame([
+                df['high'] - df['low'],
+                abs(df['high'] - df['close'].shift()),
+                abs(df['low'] - df['close'].shift())
+            ]).max()
+            atr = df['tr'].rolling(14).mean().iloc[-1]
+            stop_loss = atr * 1.5  # Example: 1.5 * ATR
+            signal = None
+            # Overbought/Oversold thresholds can be fine-tuned
+            if last_rsi > 75:  # Overbought condition
+                signal = {
+                    "pair": pair, "strategy": "RSI Overbought",
+                    "entry_range": f"{current_price:.5f} - {current_price - atr*0.5:.5f}",
+                    "stop_loss": round(current_price + stop_loss, 5),
+                    "take_profit": round(current_price - (stop_loss * 2), 5),  # 1:2 R:R
+                    "confidence": f"{min(95, int(last_rsi) + 20)}%",
+                    "risk_reward_ratio": "1:2"
+                }
+            elif last_rsi < 25:  # Oversold condition
+                signal = {
+                    "pair": pair, "strategy": "RSI Oversold",
+                    "entry_range": f"{current_price:.5f} - {current_price + atr*0.5:.5f}",
+                    "stop_loss": round(current_price - stop_loss, 5),
+                    "take_profit": round(current_price + (stop_loss * 2), 5),  # 1:2 R:R
+                    "confidence": f"{min(95, int(100 - last_rsi) + 20)}%",
+                    "risk_reward_ratio": "1:2"
+                }
+            return signal
+        except RuntimeError as e:
+            if str(e) == "rate_limited":
+                raise
+            logger.error(f"Could not generate signal for {pair}: {e}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"Could not generate signal for {pair}: {e}", exc_info=True)
+            return None
+
+signal_service = SignalService() 

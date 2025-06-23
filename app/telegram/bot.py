@@ -1,7 +1,7 @@
 import asyncio
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -12,6 +12,10 @@ from telegram.ext import (
     filters as TFilters
 )
 from app.services.api_service import api_service, ApiService # Import the instance and class
+import httpx
+import telebot
+from app.security.credential_manager import CredentialManager
+from app.mt5.mt5_manager import MT5Manager
 
 logger = logging.getLogger(__name__)
 
@@ -55,17 +59,206 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# --- Personal Menu Keyboard ---
+def create_personalized_keyboard(user_id):
+    # Final: Only show the current, correct buttons
+    keyboard = [
+        [InlineKeyboardButton("📈 My Signals", callback_data="my_signals:view:all")],
+        [InlineKeyboardButton("📋 My Trades", callback_data="my_trades:filter:all"), InlineKeyboardButton("📜 Commands", callback_data="my_commands:view:all")],
+        [InlineKeyboardButton("⚙️ My Settings", callback_data="my_settings:view:main"), InlineKeyboardButton("📞 Get Help", callback_data="my_help:contact:direct")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="my_refresh:action:now"), InlineKeyboardButton("❌ Close", callback_data="my_menu:close:main")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# --- Persistent Reply Keyboard ---
+def get_reply_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📋 Menu")]], resize_keyboard=True, one_time_keyboard=False
+    )
+
+# --- User Preferences (Stub) ---
+def get_user_preferences(user_id):
+    # TODO: Replace with real DB lookup
+    return {"risk_profile": "medium", "trading_style": "swing"}
+
+def update_user_activity(user_id, action):
+    # TODO: Log user activity to DB
+    pass
+
+# --- Send Personal Message ---
+def send_personal_message(chat_id, text, keyboard, context):
+    return context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode='Markdown')
+
+# --- Show Personal Menu ---
+async def show_personal_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    user_name = user.first_name or "Trader"
+    prefs = get_user_preferences(user_id)
+    menu_text = f"""👋 Hi {user_name}!!\n\nWelcome to your *Personal Forex Assistant Menu*.\n\nSelect an option below to manage your trading or get help.\n\n*Your risk profile:* {prefs.get('risk_profile', 'N/A')}\n*Trading style:* {prefs.get('trading_style', 'N/A')}\n"""
+    keyboard = create_personalized_keyboard(user_id)
+    if update.message:
+        await update.message.reply_text(menu_text, reply_markup=keyboard, parse_mode='Markdown')
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(menu_text, reply_markup=keyboard, parse_mode='Markdown')
+
+# --- Handle Personal Menu Callbacks ---
+async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data
+    await query.answer()
+    update_user_activity(user_id, data)
+    try:
+        action, type_, param = data.split(":", 2)
+    except ValueError:
+        await query.edit_message_text("❌ Invalid action.")
+        return
+    loading_msg = "⏳ Loading your data..."
+
+    async def safe_api_call(endpoint, retries=1):
+        for attempt in range(retries + 1):
+            try:
+                logger.info(f"Making API call: {endpoint} (attempt {attempt+1})")
+                return await api_service.make_api_call(endpoint)
+            except httpx.TimeoutException:
+                logger.warning(f"Timeout on {endpoint} (attempt {attempt+1})")
+                if attempt == retries:
+                    return 'timeout'
+            except httpx.RequestError as e:
+                logger.error(f"Request error on {endpoint}: {e}")
+                return 'request_error'
+            except Exception as e:
+                logger.error(f"General error on {endpoint}: {e}")
+                return str(e)
+        return None
+
+    if action == "my_signals":
+        await query.edit_message_text(loading_msg)
+        result = await safe_api_call("/api/signals", retries=1)
+        if result == 'timeout':
+            await query.edit_message_text("⏳ The signal service is taking too long to respond. Please try again in a few minutes.")
+            return
+        if result == 'request_error':
+            await query.edit_message_text("🌐 Could not connect to the signal service. Please check your connection and try again.")
+            return
+        if isinstance(result, str):
+            await query.edit_message_text(f"❌ Error fetching signals: {result}")
+            return
+        response_data = result
+        if not response_data:
+            await query.edit_message_text("📈 No signals available at the moment.")
+            return
+        formatted_signals = "📈 *Your Personalized Signals*\n\n"
+        for signal in response_data:
+            formatted_signals += (
+                f"🔹 *{signal['pair']}* ({signal['strategy']})\n"
+                f"   Entry: `{signal['entry_range']}` | SL: `{signal.get('stop_loss', 'N/A')}` | TP: `{signal.get('take_profit', 'N/A')}`\n"
+                f"   Confidence: *{signal['confidence']}* | R:R: `{signal.get('risk_reward_ratio', 'N/A')}`\n\n"
+            )
+        formatted_signals += "✅ *Signals updated*"
+        await query.edit_message_text(formatted_signals, parse_mode='Markdown')
+    elif action == "my_trades":
+        await query.edit_message_text(loading_msg)
+        result = await safe_api_call("/api/trades", retries=1)
+        if result == 'timeout':
+            await query.edit_message_text("⏳ The trade history service is taking too long to respond. Please try again in a few minutes.")
+            return
+        if result == 'request_error':
+            await query.edit_message_text("🌐 Could not connect to the trade history service. Please check your connection and try again.")
+            return
+        if isinstance(result, str):
+            await query.edit_message_text(f"❌ Error fetching trade history: {result}")
+            return
+        data = result
+        if not data:
+            await query.edit_message_text("📋 No trades found in your history.")
+            return
+        response = "📋 *Your Trade History*\n\n"
+        for trade in data[:10]:
+            status_emoji = "🟢" if trade.get('status') == "closed" else "🟡"
+            response += (
+                f"{status_emoji} *{trade.get('symbol', 'N/A')}* ({trade.get('order_type', '').upper()})\n"
+                f"   Entry: `{trade.get('entry_price', 'N/A')}` | Status: `{trade.get('status', 'N/A')}`\n"
+            )
+            if trade.get('close_price'):
+                response += f"   Exit: `{trade.get('close_price')}` | P&L: `${trade.get('pnl', 0):.2f}`\n"
+            response += "\n"
+        response += "✅ *Trade history updated*"
+        await query.edit_message_text(response, parse_mode='Markdown')
+    elif action == "my_commands":
+        commands_list = (
+            "\n".join([
+                "`/signals` - Get the latest forex signals",
+                "`/market [PAIR]` - View live market data (e.g., `/market EURUSD`)",
+                "`/analysis [PAIR]` - Technical analysis for a pair",
+                "`/trades` - View your trade history",
+                "`/risk [PAIR] [RISK%] [SL PIPS]` - Calculate position size",
+                "`/pipcalc [PAIR] [SIZE]` - Calculate pip values",
+                "`/strategies` - Learn about our strategies",
+                "`/donate` - Support the bot",
+                "`/help` - Show this command list"
+            ])
+        )
+        await query.edit_message_text(f"📜 *Available Commands*\n\n{commands_list}", parse_mode='Markdown')
+    elif action == "my_settings":
+        await query.edit_message_text(loading_msg)
+        result = await safe_api_call(f"/api/settings?telegram_id={user_id}", retries=1)
+        if result == 'timeout':
+            await query.edit_message_text("⏳ The settings service is taking too long to respond. Please try again in a few minutes.")
+            return
+        if result == 'request_error':
+            await query.edit_message_text("🌐 Could not connect to the settings service. Please check your connection and try again.")
+            return
+        if isinstance(result, str):
+            await query.edit_message_text(f"❌ Error fetching settings: {result}")
+            return
+        data = result
+        if not data:
+            await query.edit_message_text("⚙️ No settings found for your account.")
+            return
+        settings_text = (
+            f"⚙️ *Your Settings*\n\n"
+            f"Preferred pairs: `{data.get('preferred_pairs', 'N/A')}`\n"
+            f"Default risk: `{data.get('default_risk', 'N/A')}%`"
+        )
+        await query.edit_message_text(settings_text, parse_mode='Markdown')
+    elif action == "my_help":
+        await query.edit_message_text(loading_msg)
+        result = await safe_api_call(f"/api/help?telegram_id={user_id}", retries=1)
+        if result == 'timeout':
+            await query.edit_message_text("⏳ The help service is taking too long to respond. Please try again in a few minutes.")
+            return
+        if result == 'request_error':
+            await query.edit_message_text("🌐 Could not connect to the help service. Please check your connection and try again.")
+            return
+        if isinstance(result, str):
+            await query.edit_message_text(f"❌ Error fetching help info: {result}")
+            return
+        data = result
+        if not data or 'message' not in data:
+            await query.edit_message_text("❓ No help info found.")
+            return
+        await query.edit_message_text(f"📞 {data['message']}", parse_mode='Markdown')
+    elif action == "my_refresh":
+        await show_personal_menu(update, context)
+    elif action == "my_menu" and type_ == "close":
+        await query.edit_message_text("❌ Menu closed. Type /menu to open again.")
+    else:
+        await query.edit_message_text("❓ This feature is coming soon!")
+
 # --- Command Handlers (Frontend Logic Only) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "Trader"
     await update.message.reply_text(
         welcome_message.format(name=user_name),
-        reply_markup=get_main_keyboard()
+        reply_markup=get_reply_keyboard()
     )
+    await show_personal_menu(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(commands_message, parse_mode='Markdown')
+    await show_personal_menu(update, context)
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send loading message
@@ -74,29 +267,29 @@ async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         response_data = await api_service.make_api_call("/api/signals")
         
-        if not response_data:
-            await loading_msg.edit_text("😕 Could not fetch signals. The server might be down. Please try again later.")
-            return
-        
+        # This part will now only be reached on success (200 OK)
         formatted_signals = "📊 **Latest Trading Signals**\n\n"
         for signal in response_data:
             formatted_signals += (
                 f"🔹 **{signal['pair']}** ({signal['strategy']})\n"
-                f"   Entry: `{signal['entry_range']}` | SL: `{signal['stop_loss']}` | TP: `{signal['take_profit']}`\n"
-                f"   Confidence: **{signal['confidence']}** | R:R: `{signal['risk_reward_ratio']}`\n\n"
+                f"   Entry: `{signal['entry_range']}` | SL: `{signal.get('stop_loss', 'N/A')}` | TP: `{signal.get('take_profit', 'N/A')}`\n"
+                f"   Confidence: **{signal['confidence']}** | R:R: `{signal.get('risk_reward_ratio', 'N/A')}`\n\n"
             )
         
         formatted_signals += "✅ *Signals updated*"
         await loading_msg.edit_text(formatted_signals, parse_mode='Markdown')
         
-    except Exception as e:
-        error_msg = "❌ Could not fetch signals. Please try again later."
-        if "timeout" in str(e).lower():
-            error_msg = "⚠️ Connection timeout - please try again in a few seconds"
-        elif "404" in str(e):
-            error_msg = "📊 No signals available at the moment"
-        
-        await loading_msg.edit_text(error_msg)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            await loading_msg.edit_text("📊 No new signals found. The market is quiet. Check back later!")
+        elif e.response.status_code == 503:
+            await loading_msg.edit_text("⚠️ The signal service is temporarily unavailable. Please try again in a few minutes.")
+        else:
+            await loading_msg.edit_text("❌ A server error occurred. Please try again later.")
+    except httpx.RequestError:
+        await loading_msg.edit_text("🌐 Could not connect to the server. Please check your connection and try again.")
+    except Exception:
+        await loading_msg.edit_text("An unexpected error occurred. Please try again.")
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -261,56 +454,53 @@ async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
         return
-    
+
     pair = context.args[0].upper()
     try:
         trade_size = float(context.args[1])
     except ValueError:
         await update.message.reply_text("❌ Invalid trade size. Please enter a valid number.")
         return
-    
+
     if trade_size <= 0:
         await update.message.reply_text("❌ Trade size must be greater than 0.")
         return
-    
-    # Send loading message
+
     loading_msg = await update.message.reply_text("🔄 Calculating pip value...")
-    
+
     try:
         data = await api_service.make_api_call(f"/api/pipcalc/{pair}/{trade_size}")
-        
-        if not data:
-            await loading_msg.edit_text("❌ Could not calculate pip value. Please check your inputs or try again.")
+        if not data or "error" in data:
+            error_msg = data.get("error", "Could not calculate pip value.")
+            await loading_msg.edit_text(f"❌ {error_msg}")
             return
-        
-        # Calculate additional pip values for common scenarios
+
         pip_value = data['pip_value_usd']
-        ten_pips = pip_value * 10
-        fifty_pips = pip_value * 50
-        hundred_pips = pip_value * 100
+        contract_size = trade_size * 100000
+
+        pip_movements = {
+            "1 pip": pip_value * 1,
+            "5 pips": pip_value * 5,
+            "10 pips": pip_value * 10,
+            "20 pips": pip_value * 20,
+            "50 pips": pip_value * 50,
+            "100 pips": pip_value * 100,
+        }
         
+        table = "\n".join([f"• {pips} = ${value:,.2f}" for pips, value in pip_movements.items()])
+
         response = (
-            f"💰 **Pip Calculator**\n\n"
-            f"**Pair:** `{data['pair']}`\n"
-            f"**Trade Size:** `{data['trade_size']}` lots\n"
-            f"**Pip Value:** `${pip_value:.2f}` USD\n\n"
-            f"**Common Scenarios:**\n"
-            f"• 10 pips = `${ten_pips:.2f}`\n"
-            f"• 50 pips = `${fifty_pips:.2f}`\n"
-            f"• 100 pips = `${hundred_pips:.2f}`\n\n"
-            f"💡 *This is the value of 1 pip movement for your position*"
+            f"📏 **Pip Calculator - {data['pair']}**\n\n"
+            f"💰 **Trade Size:** `{data['trade_size']}` lots ({int(contract_size):,} units)\n"
+            f"📊 **Pip Value:** `${pip_value:,.2f}`\n\n"
+            f"**Pip Movement Table:**\n{table}\n\n"
+            f"💡 *Each pip movement is worth ${pip_value:,.2f} of profit or loss.*"
         )
-        
+
         await loading_msg.edit_text(response, parse_mode='Markdown')
-        
+
     except Exception as e:
-        error_msg = "❌ Could not calculate pip value. Please try again later."
-        if "timeout" in str(e).lower():
-            error_msg = "⚠️ Calculation timeout - please try again"
-        elif "404" in str(e):
-            error_msg = "❌ Currency pair not supported"
-        
-        await loading_msg.edit_text(error_msg)
+        await loading_msg.edit_text("❌ An unexpected error occurred. Please try again.")
 
 async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(donation_message, parse_mode='Markdown', disable_web_page_preview=True)
@@ -365,11 +555,24 @@ async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(response, parse_mode='Markdown')
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles all inline keyboard button clicks."""
-    query = update.callback_query
-    await query.answer()
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_personal_menu(update, context)
 
+async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_personal_menu(update, context)
+
+# --- Persistent Reply Keyboard Handler ---
+async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "📋 Menu":
+        await show_personal_menu(update, context)
+
+# --- Button Handler (Route to Personal or Old) ---
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.data.startswith("my_"):
+        await handle_personal_callback(update, context)
+        return
+    await query.answer()
     COMMAND_MAP = {
         'signals': signals,
         'market_menu': lambda u,c: u.message.reply_text("To get market data, use the command: `/market [PAIR]`"),
@@ -377,9 +580,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'donate': donate,
         'help': help_command,
     }
-    
     if query.data in COMMAND_MAP:
-        # We pass the original update object to the command functions
         await COMMAND_MAP[query.data](query, context)
     else:
         await query.edit_message_text(text=f"Coming soon: {query.data}")
@@ -388,6 +589,8 @@ def setup_handlers(app: Application):
     """Sets up all the command and message handlers for the bot."""
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_command))
+    app.add_handler(CommandHandler('menu', menu_command))
+    app.add_handler(CommandHandler('commands', commands_command))
     app.add_handler(CommandHandler('signals', signals))
     app.add_handler(CommandHandler('market', market))
     app.add_handler(CommandHandler('analysis', analysis))
@@ -397,3 +600,55 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('trades', trades))
     app.add_handler(CommandHandler('strategies', strategies))
     app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(TFilters.TEXT & (~TFilters.COMMAND), reply_keyboard_handler))
+
+bot = telebot.TeleBot(os.getenv("TELEGRAM_FOREX_BOT_TOKEN"))
+cred_mgr = CredentialManager("forex_bot.db", os.getenv("FERNET_KEY"))
+mt5_mgr = MT5Manager()
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(message.chat.id, "Welcome! Use /connect to link your MT5 account.")
+
+@bot.message_handler(commands=['connect'])
+def connect(message):
+    # Placeholder: In production, ask for login, password, server interactively
+    bot.send_message(message.chat.id, "Please send your MT5 login, password, and server (format: login,password,server)")
+    bot.register_next_step_handler(message, process_credentials)
+
+def process_credentials(message):
+    try:
+        login, password, server = message.text.split(",")
+        cred_mgr.store_credentials(message.from_user.id, login, password, server)
+        success, msg = mt5_mgr.connect(message.from_user.id, login, password, server)
+        if success:
+            bot.send_message(message.chat.id, "Connected to your MT5 account!")
+        else:
+            bot.send_message(message.chat.id, f"Connection failed: {msg}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Error: {e}")
+
+@bot.message_handler(commands=['account'])
+def account(message):
+    creds = cred_mgr.get_credentials(message.from_user.id)
+    if not creds:
+        bot.send_message(message.chat.id, "No credentials found. Use /connect first.")
+        return
+    if not mt5_mgr.is_connected(message.from_user.id):
+        bot.send_message(message.chat.id, "Not connected. Use /connect.")
+        return
+    # Placeholder: Fetch and display account info from MT5
+    bot.send_message(message.chat.id, "[Account info will be shown here]")
+
+@bot.message_handler(commands=['disconnect'])
+def disconnect(message):
+    mt5_mgr.disconnect(message.from_user.id)
+    bot.send_message(message.chat.id, "Disconnected from MT5 account.")
+
+@bot.message_handler(commands=['status'])
+def status(message):
+    connected = mt5_mgr.is_connected(message.from_user.id)
+    bot.send_message(message.chat.id, f"MT5 connection status: {'Connected' if connected else 'Not connected'}")
+
+if __name__ == "__main__":
+    bot.polling()
