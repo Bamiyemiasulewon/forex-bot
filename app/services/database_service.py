@@ -76,6 +76,14 @@ def get_db():
     finally:
         db.close()
 
+def get_db_dependency():
+    """FastAPI dependency to get a database session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 def create_db_and_tables():
     """Creates all database tables."""
     Base.metadata.create_all(bind=engine)

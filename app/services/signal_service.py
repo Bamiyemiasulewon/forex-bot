@@ -6,7 +6,7 @@ from app.utils.indicators import calculate_rsi, calculate_macd
 from datetime import datetime
 from typing import List, Dict
 from fastapi import Depends
-from app.services.database_service import get_db
+from app.services.database_service import get_db_dependency
 
 class SignalService:
     def __init__(self, db: Session):
@@ -71,5 +71,5 @@ class SignalService:
         ]
         return signals
 
-def get_signal_service(db: Session = Depends(get_db)) -> SignalService:
+def get_signal_service(db: Session = Depends(get_db_dependency)) -> SignalService:
     return SignalService(db) 

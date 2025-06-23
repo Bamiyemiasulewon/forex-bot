@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 from app.services.market_service import market_service
 from app.services.risk_service import risk_service
 from app.services.signal_service import SignalService, get_signal_service
-from app.services.database_service import get_db, User, Trade
+from app.services.database_service import get_db_dependency, User, Trade
 from sqlalchemy.orm import Session
 
 
@@ -19,6 +19,29 @@ async def get_trading_signals(signal_service: SignalService = Depends(get_signal
         raise HTTPException(status_code=404, detail="No signals available at the moment.")
     return signals
 
+# --- Market Data Endpoints ---
+@router.get("/market/{pair}", response_model=Dict)
+async def get_market_data(pair: str):
+    """Fetch market data for a given pair."""
+    # Mock data since we removed yfinance
+    import random
+    from datetime import datetime
+    
+    base_price = 1.0850 if "EUR" in pair else 1.2500 if "GBP" in pair else 150.0 if "JPY" in pair else 1.0000
+    variation = random.uniform(-0.01, 0.01)
+    current_price = base_price + variation
+    
+    data = {
+        'pair': pair,
+        'price': round(current_price, 5),
+        'open': round(base_price, 5),
+        'high': round(current_price + 0.005, 5),
+        'low': round(current_price - 0.005, 5),
+        'volume': random.randint(1000, 10000),
+        'timestamp': datetime.now().isoformat()
+    }
+    return data
+
 # --- Calculator Endpoints ---
 @router.get("/pipcalc/{pair}/{trade_size}")
 async def get_pip_value(pair: str, trade_size: float):
@@ -29,7 +52,7 @@ async def get_pip_value(pair: str, trade_size: float):
     return {"pair": pair, "trade_size": trade_size, "pip_value_usd": value}
 
 @router.get("/risk/{pair}/{risk_percent}/{stop_loss_pips}")
-async def get_risk_calculation(pair: str, risk_percent: float, stop_loss_pips: float, db: Session = Depends(get_db)):
+async def get_risk_calculation(pair: str, risk_percent: float, stop_loss_pips: float, db: Session = Depends(get_db_dependency)):
     """Calculate position size based on risk parameters."""
     # In a real app, you'd get the user's balance from their authenticated session
     # For now, we'll use a default or fetch a default user.
@@ -73,7 +96,7 @@ async def get_strategies():
 
 # --- Trade History ---
 @router.get("/trades")
-async def get_trades(db: Session = Depends(get_db)):
+async def get_trades(db: Session = Depends(get_db_dependency)):
     """Fetch user trades from the database."""
     # This should be authenticated to get trades for a specific user.
     trades = db.query(Trade).order_by(Trade.created_at.desc()).limit(20).all()
