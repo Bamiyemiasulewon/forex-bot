@@ -603,7 +603,7 @@ def setup_handlers(app: Application):
     app.add_handler(MessageHandler(TFilters.TEXT & (~TFilters.COMMAND), reply_keyboard_handler))
 
 bot = telebot.TeleBot(os.getenv("TELEGRAM_FOREX_BOT_TOKEN"))
-cred_mgr = CredentialManager("forex_bot.db", os.getenv("FERNET_KEY"))
+cred_mgr = CredentialManager("forex_bot.db", "eKnjQbB073B0TfMthgsOzoGPo9w1xjgBOM-eWl8hGq4=")
 mt5_mgr = MT5Manager()
 
 @bot.message_handler(commands=['start'])

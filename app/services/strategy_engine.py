@@ -157,4 +157,95 @@ def multi_strategy_signal(df):
 def multi_timeframe_analysis(data_dict):
     # data_dict: {'D': df_daily, '4H': df_4h, '1H': df_1h, '15M': df_15m}
     # Placeholder for multi-timeframe logic
-    return {'trend': 'up', 'entry': 'confirmed', 'confirmation': True} 
+    return {'trend': 'up', 'entry': 'confirmed', 'confirmation': True}
+
+def detect_break_of_structure(df, direction='up'):
+    """
+    Detects a break of structure in the given direction.
+    For 'up', looks for a close above the previous swing high.
+    For 'down', looks for a close below the previous swing low.
+    Returns True if break detected, and the index of the break candle.
+    """
+    lookback = 20  # Number of bars to look back for swing high/low
+    if direction == 'up':
+        swing_high = df['high'].rolling(lookback).max().shift(1)
+        bos = df['close'] > swing_high
+    else:
+        swing_low = df['low'].rolling(lookback).min().shift(1)
+        bos = df['close'] < swing_low
+    if bos.iloc[-1]:
+        return True, bos.index[-1]
+    return False, None
+
+def find_order_block(df, direction='bullish'):
+    """
+    Finds the last order block before the break of structure.
+    For bullish: last bearish candle before the bullish move.
+    For bearish: last bullish candle before the bearish move.
+    Returns the index and price zone (open, close, high, low) of the order block.
+    """
+    lookback = 20
+    if direction == 'bullish':
+        # Last bearish candle before the up move
+        mask = (df['close'] < df['open'])
+    else:
+        # Last bullish candle before the down move
+        mask = (df['close'] > df['open'])
+    ob_idx = df[mask].iloc[-lookback:].index[-1] if mask.iloc[-lookback:].any() else None
+    if ob_idx is not None:
+        ob_row = df.loc[ob_idx]
+        return ob_idx, {'open': ob_row['open'], 'close': ob_row['close'], 'high': ob_row['high'], 'low': ob_row['low']}
+    return None, None
+
+def fibonacci_levels(swing_low, swing_high):
+    """
+    Returns the 38.2%, 50%, and 61.8% retracement levels between swing_low and swing_high.
+    """
+    levels = {
+        '38.2': swing_high - 0.382 * (swing_high - swing_low),
+        '50.0': swing_high - 0.5 * (swing_high - swing_low),
+        '61.8': swing_high - 0.618 * (swing_high - swing_low)
+    }
+    return levels
+
+def order_block_rsi_fib_strategy(df):
+    """
+    Implements the Order Block + RSI + Fibonacci strategy.
+    Returns {'signal': 'buy'/'sell'/None, 'confidence': int, 'strategy': str, 'entry_zone': float, 'stop_loss': float, 'take_profit': float}
+    """
+    if len(df) < 50:
+        return {'signal': None, 'confidence': 0, 'strategy': 'Insufficient data'}
+    rsi = calculate_rsi(df['close'], 14)
+    # --- BUY SETUP ---
+    bos_up, bos_idx = detect_break_of_structure(df, 'up')
+    if bos_up:
+        ob_idx, ob_zone = find_order_block(df.iloc[:bos_idx+1], 'bullish')
+        if ob_zone:
+            swing_low = df['low'].iloc[-30:-10].min()
+            swing_high = df['high'].iloc[-30:-10].max()
+            fibs = fibonacci_levels(swing_low, swing_high)
+            # Check if OB aligns with any fib level
+            for lvl, price in fibs.items():
+                if ob_zone['low'] <= price <= ob_zone['high']:
+                    if rsi.iloc[-1] < 30:
+                        # Entry at OB zone, SL just below OB, TP at 1:2 RR
+                        entry = price
+                        stop = ob_zone['low'] - (ob_zone['high'] - ob_zone['low']) * 0.2
+                        take_profit = entry + 2 * (entry - stop)
+                        return {'signal': 'buy', 'confidence': 90, 'strategy': 'Order Block + RSI + Fib', 'entry_zone': entry, 'stop_loss': stop, 'take_profit': take_profit}
+    # --- SELL SETUP ---
+    bos_down, bos_idx = detect_break_of_structure(df, 'down')
+    if bos_down:
+        ob_idx, ob_zone = find_order_block(df.iloc[:bos_idx+1], 'bearish')
+        if ob_zone:
+            swing_high = df['high'].iloc[-30:-10].max()
+            swing_low = df['low'].iloc[-30:-10].min()
+            fibs = fibonacci_levels(swing_low, swing_high)
+            for lvl, price in fibs.items():
+                if ob_zone['low'] <= price <= ob_zone['high']:
+                    if rsi.iloc[-1] > 70:
+                        entry = price
+                        stop = ob_zone['high'] + (ob_zone['high'] - ob_zone['low']) * 0.2
+                        take_profit = entry - 2 * (stop - entry)
+                        return {'signal': 'sell', 'confidence': 90, 'strategy': 'Order Block + RSI + Fib', 'entry_zone': entry, 'stop_loss': stop, 'take_profit': take_profit}
+    return {'signal': None, 'confidence': 0, 'strategy': 'No actionable signal'} 
