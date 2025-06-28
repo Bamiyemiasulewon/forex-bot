@@ -11,6 +11,59 @@ import signal
 # Enable tracemalloc for debugging memory leaks
 tracemalloc.start()
 
+# --- Session Management for Multi-step Commands ---
+class SessionManager:
+    def __init__(self):
+        self.sessions = {}  # user_id -> session_data
+        self.timeout = 120  # 2 minutes timeout
+    
+    def create_session(self, user_id: int, session_type: str):
+        """Create a new session for a user."""
+        self.sessions[user_id] = {
+            'type': session_type,
+            'data': {},
+            'created_at': time.time()
+        }
+        logger.info(f"Created {session_type} session for user {user_id}")
+    
+    def get_session(self, user_id: int):
+        """Get session data for a user."""
+        if user_id not in self.sessions:
+            return None
+        
+        session = self.sessions[user_id]
+        if time.time() - session['created_at'] > self.timeout:
+            del self.sessions[user_id]
+            return None
+        
+        return session
+    
+    def update_session(self, user_id: int, key: str, value: str):
+        """Update session data."""
+        if user_id in self.sessions:
+            self.sessions[user_id]['data'][key] = value
+            self.sessions[user_id]['created_at'] = time.time()  # Reset timeout
+    
+    def clear_session(self, user_id: int):
+        """Clear session for a user."""
+        if user_id in self.sessions:
+            del self.sessions[user_id]
+            logger.info(f"Cleared session for user {user_id}")
+    
+    def cleanup_expired_sessions(self):
+        """Remove expired sessions."""
+        current_time = time.time()
+        expired_users = [
+            user_id for user_id, session in self.sessions.items()
+            if current_time - session['created_at'] > self.timeout
+        ]
+        for user_id in expired_users:
+            del self.sessions[user_id]
+            logger.info(f"Cleaned up expired session for user {user_id}")
+
+# Global session manager
+session_manager = SessionManager()
+
 # --- Utility for safe async calls ---
 def run_async_safely(coro):
     """Run an async coroutine safely, regardless of event loop state."""
@@ -544,35 +597,42 @@ async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- MT5 Trading Commands ---
 
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Connect to MT5 - prompts for login, password, server"""
-    if not context.args or len(context.args) < 3:
-        help_text = (
-            "🔗 **MT5 Connection Help:**\n\n"
-            "**Format:** `/connect [login] [password] [server]`\n"
-            "**Example:** `/connect 12345678 mypassword MetaQuotes-Demo`\n\n"
-            "💡 *Your credentials are encrypted and secure*"
-        )
-        await update.message.reply_text(help_text, parse_mode='Markdown')
+    """Multi-step MT5 connection process"""
+    user_id = update.effective_user.id
+    
+    # Clean up expired sessions first
+    session_manager.cleanup_expired_sessions()
+    
+    # If user has arguments, use the old single-step method for backward compatibility
+    if context.args and len(context.args) >= 3:
+        login, password, server = context.args[0], context.args[1], context.args[2]
+        loading_msg = await update.message.reply_text("🔗 Connecting to MT5...")
+        
+        try:
+            data = await api_service.make_api_call("/api/mt5/connect", method="POST", json={
+                "login": login,
+                "password": password,
+                "server": server
+            })
+            
+            if data and data.get("success"):
+                await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
+            else:
+                error_msg = data.get("error", "Connection failed. Please check your credentials.")
+                await loading_msg.edit_text(f"❌ **Connection Failed:** {error_msg}")
+                
+        except Exception as e:
+            await loading_msg.edit_text("❌ Connection error. Please try again.")
         return
     
-    login, password, server = context.args[0], context.args[1], context.args[2]
-    loading_msg = await update.message.reply_text("🔗 Connecting to MT5...")
-    
-    try:
-        data = await api_service.make_api_call("/api/mt5/connect", method="POST", json={
-            "login": login,
-            "password": password,
-            "server": server
-        })
-        
-        if data and data.get("success"):
-            await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
-        else:
-            error_msg = data.get("error", "Connection failed. Please check your credentials.")
-            await loading_msg.edit_text(f"❌ **Connection Failed:** {error_msg}")
-            
-    except Exception as e:
-        await loading_msg.edit_text("❌ Connection error. Please try again.")
+    # Start multi-step process
+    session_manager.create_session(user_id, "mt5_connect")
+    await update.message.reply_text(
+        "🔗 **MT5 Connection Setup**\n\n"
+        "Please enter your MT5 login ID:\n\n"
+        "💡 *You can use /cancel at any time to stop this process*",
+        parse_mode='Markdown'
+    )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check MT5 connection status"""
@@ -691,7 +751,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data and data.get("success"):
             ticket = data.get("ticket", "N/A")
             await loading_msg.edit_text(f"✅ **Buy Order Placed Successfully!**\n\n**Ticket:** {ticket}\n**Symbol:** {symbol}\n**Lot:** {lot}")
-    else:
+        else:
             error_msg = data.get("error", "Order failed. Please check your inputs.")
             await loading_msg.edit_text(f"❌ **Order Failed:** {error_msg}")
             
@@ -907,6 +967,103 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_personal_menu(update, context)
 
+async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle reply keyboard button presses and multi-step command responses."""
+    text = update.message.text
+    user = update.effective_user
+    user_id = user.id
+    
+    # Check if user has an active session
+    session = session_manager.get_session(user_id)
+    
+    if session and session['type'] == 'mt5_connect':
+        # Handle MT5 connection multi-step process
+        await handle_mt5_connect_step(update, context, text, session)
+        return
+    
+    # Default reply keyboard handling
+    if text == "📋 Menu":
+        await show_personal_menu(update, context)
+    else:
+        # Default response for unrecognized text
+        await update.message.reply_text(
+            "Use /help to see available commands or press the '📋 Menu' button.",
+            reply_markup=get_reply_keyboard()
+        )
+
+async def handle_mt5_connect_step(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, session: dict):
+    """Handle individual steps of the MT5 connection process."""
+    user_id = update.effective_user.id
+    
+    # Get current step based on what data we have
+    current_data = session['data']
+    
+    if 'login' not in current_data:
+        # Step 1: Collect login
+        session_manager.update_session(user_id, 'login', text)
+        await update.message.reply_text(
+            "Now enter your password:\n\n"
+            "💡 *You can use /cancel at any time to stop this process*",
+            parse_mode='Markdown'
+        )
+        
+    elif 'password' not in current_data:
+        # Step 2: Collect password
+        session_manager.update_session(user_id, 'password', text)
+        await update.message.reply_text(
+            "Finally, enter your server name:\n\n"
+            "💡 *You can use /cancel at any time to stop this process*",
+            parse_mode='Markdown'
+        )
+        
+    elif 'server' not in current_data:
+        # Step 3: Collect server and attempt connection
+        session_manager.update_session(user_id, 'server', text)
+        
+        # Get all collected data
+        login = current_data['login']
+        password = current_data['password']
+        server = text
+        
+        # Attempt connection
+        loading_msg = await update.message.reply_text("🔗 Connecting to MT5...")
+        
+        try:
+            data = await api_service.make_api_call("/api/mt5/connect", method="POST", json={
+                "login": login,
+                "password": password,
+                "server": server
+            })
+            
+            if data and data.get("success"):
+                await loading_msg.edit_text("✅ **Connected successfully.**")
+            else:
+                error_msg = data.get("error", "Connection failed. Please check your credentials and try again.")
+                await loading_msg.edit_text(f"❌ **Connection failed. Please check your credentials and try again.**")
+                
+        except Exception as e:
+            await loading_msg.edit_text("❌ **Connection failed. Please check your credentials and try again.**")
+        
+        # Clear session after connection attempt
+        session_manager.clear_session(user_id)
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel any active multi-step process."""
+    user_id = update.effective_user.id
+    session = session_manager.get_session(user_id)
+    
+    if session:
+        session_manager.clear_session(user_id)
+        await update.message.reply_text(
+            "❌ **Process cancelled.**\n\nYou can start over with `/connect` when ready.",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ No active process to cancel.",
+            parse_mode='Markdown'
+        )
+
 def setup_handlers(app: Application):
     """Sets up all the command and message handlers for the bot."""
     app.add_handler(CommandHandler('start', start))
@@ -934,8 +1091,9 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('closeall', closeall))
     app.add_handler(CommandHandler('price', price))
     app.add_handler(CommandHandler('summary', summary))
-    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(CallbackQueryHandler(handle_personal_callback))
     app.add_handler(MessageHandler(TFilters.TEXT & (~TFilters.COMMAND), reply_keyboard_handler))
+    app.add_handler(CommandHandler('cancel', cancel))
 
 async def run_network_diagnostics():
     """Run comprehensive network diagnostics."""
@@ -957,47 +1115,96 @@ async def run_network_diagnostics():
         logger.warning("⚠️ Local API server is not responding to health checks")
     return diagnostics
 
-def start_bot():
-    global application
+async def start_telegram_bot(telegram_token: str = None, shutdown_event: asyncio.Event = None):
+    """Start the Telegram bot asynchronously."""
+    global telegram_app, bot_task
+    
+    # Use provided token or fallback to environment variable
+    if telegram_token is None:
+        telegram_token = os.getenv("TELEGRAM_TOKEN", "8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY")
+    
+    # Use provided shutdown event or create a default one
+    if shutdown_event is None:
+        shutdown_event = asyncio.Event()
+    
+    try:
+        logger.info("🤖 Initializing Telegram bot...")
+        
+        # Create and configure the Telegram application
+        telegram_app = (
+            Application.builder()
+            .token(telegram_token)
+            .connect_timeout(30.0)
+            .pool_timeout(30.0)
+            .build()
+        )
+        
+        # Setup bot handlers
+        setup_handlers(telegram_app)
+        
+        # Initialize the application
+        await telegram_app.initialize()
+        
+        # Delete any existing webhook to ensure polling mode
         try:
-        logger.info("Starting bot...")
-            
-        diagnostics = run_async_safely(run_network_diagnostics())
-            if not diagnostics["internet"]:
-                logger.error("Network diagnostics failed. Please check your connection.")
-                    return False
-            
-            application = ApplicationBuilder().token("8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY").build()
-            
-            async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-                logger.error(f"Exception while handling an update: {context.error}")
-            
-            application.add_error_handler(error_handler)
-            setup_handlers(application)
-            
-            logger.info("✅ Bot started successfully!")
-        # Synchronous, blocking call
-        application.run_polling(timeout=TELEGRAM_API_TIMEOUT)
-        return True
-            
+            webhook_info = await telegram_app.bot.get_webhook_info()
+            if webhook_info.url:
+                logger.info(f"Deleting existing webhook: {webhook_info.url}")
+                await telegram_app.bot.delete_webhook()
         except Exception as e:
-        logger.error(f"Error starting bot: {e}")
-                return False
+            logger.warning(f"Error deleting webhook: {e}")
+        
+        # Start the bot in polling mode
+        await telegram_app.start()
+        await telegram_app.updater.start_polling(
+            timeout=30,
+            drop_pending_updates=True
+        )
+        
+        logger.info("✅ Telegram bot started successfully!")
+        
+        # Start periodic session cleanup task
+        asyncio.create_task(periodic_session_cleanup(shutdown_event))
+        
+        # Keep the bot running until shutdown
+        while not shutdown_event.is_set():
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"❌ Error starting Telegram bot: {e}")
+        # Don't raise the exception to prevent crashing the entire application
+        # Just log the error and continue
+        return
+    finally:
+        await stop_telegram_bot()
+
+async def periodic_session_cleanup(shutdown_event: asyncio.Event = None):
+    """Periodically clean up expired sessions."""
+    if shutdown_event is None:
+        shutdown_event = asyncio.Event()
+    
+    while not shutdown_event.is_set():
+        try:
+            session_manager.cleanup_expired_sessions()
+            await asyncio.sleep(60)  # Run every minute
+        except Exception as e:
+            logger.error(f"Error in session cleanup: {e}")
+            await asyncio.sleep(60)
 
 async def shutdown_bot():
     """Properly shutdown the bot application."""
-    global application
-    if application:
+    global telegram_app
+    if telegram_app:
         try:
             logger.info("🛑 Shutting down bot...")
-            if application.running:
-            await application.stop()
-                await application.shutdown()
+            if telegram_app.running:
+                await telegram_app.stop()
+                await telegram_app.shutdown()
             logger.info("✅ Bot shutdown complete")
         except Exception as e:
             logger.error(f"Error during bot shutdown: {e}")
         finally:
-            application = None
+            telegram_app = None
 
 def signal_handler(signum, frame):
     """Handle shutdown signals."""
