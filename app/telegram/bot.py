@@ -1,6 +1,28 @@
-import asyncio
+import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+import asyncio
 import logging
+import socket
+import time
+import tracemalloc
+import signal
+
+# Enable tracemalloc for debugging memory leaks
+tracemalloc.start()
+
+# --- Utility for safe async calls ---
+def run_async_safely(coro):
+    """Run an async coroutine safely, regardless of event loop state."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            return asyncio.ensure_future(coro)
+        else:
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        return asyncio.run(coro)
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
@@ -11,13 +33,88 @@ from telegram.ext import (
     MessageHandler,
     filters as TFilters
 )
-from app.services.api_service import api_service, ApiService # Import the instance and class
+from app.services.api_service import api_service, ApiService  # Import the instance and class
 import httpx
-import telebot
 from app.security.credential_manager import CredentialManager
 from app.mt5.mt5_manager import MT5Manager
 
 logger = logging.getLogger(__name__)
+
+# Global application instance for proper shutdown
+application = None
+
+# --- Network Configuration ---
+TELEGRAM_API_TIMEOUT = 30.0
+LOCAL_API_TIMEOUT = 10.0
+MAX_RETRIES = 3
+RETRY_DELAY = 5.0
+
+# --- Network Health Check Functions ---
+def check_internet_connectivity():
+    """Check if internet connection is available."""
+    try:
+        # Try to resolve a known domain
+        socket.gethostbyname("8.8.8.8")
+        return True
+    except socket.gaierror:
+        return False
+
+def check_telegram_api():
+    """Check if Telegram API is reachable."""
+    try:
+        socket.gethostbyname("api.telegram.org")
+        return True
+    except socket.gaierror:
+        return False
+
+def check_local_server():
+    """Check if local API server is running."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex(('127.0.0.1', 8001))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+async def test_api_connectivity():
+    """Test API connectivity with proper error handling."""
+    try:
+        async with httpx.AsyncClient(timeout=LOCAL_API_TIMEOUT) as client:
+            response = await client.get("http://127.0.0.1:8001/health")
+            return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"Local API server not reachable: {e}")
+        return False
+
+# --- Enhanced API Service with Retry Logic ---
+async def safe_api_call_with_retry(endpoint, max_retries=MAX_RETRIES):
+    """Make API call with retry logic and proper error handling."""
+    for attempt in range(max_retries + 1):
+        try:
+            logger.info(f"Making API call: {endpoint} (attempt {attempt+1}/{max_retries+1})")
+            if not await test_api_connectivity():
+                logger.warning("Local API server is not running - returning None")
+                return None
+            result = await api_service.make_api_call(endpoint)
+            if result is not None:
+                return result
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout on {endpoint} (attempt {attempt+1})")
+            if attempt == max_retries:
+                return None
+        except httpx.RequestError as e:
+            logger.error(f"Request error on {endpoint}: {e}")
+            if attempt == max_retries:
+                return None
+        except Exception as e:
+            logger.error(f"General error on {endpoint}: {e}")
+            if attempt == max_retries:
+                return None
+        if attempt < max_retries:
+            await asyncio.sleep(RETRY_DELAY)
+    return None
 
 # --- Message Templates ---
 welcome_message = '''🤖 Welcome to ProfitPro Bot!
@@ -61,7 +158,6 @@ def get_main_keyboard():
 
 # --- Personal Menu Keyboard ---
 def create_personalized_keyboard(user_id):
-    # Final: Only show the current, correct buttons
     keyboard = [
         [InlineKeyboardButton("📈 My Signals", callback_data="my_signals:view:all")],
         [InlineKeyboardButton("📋 My Trades", callback_data="my_trades:filter:all"), InlineKeyboardButton("📜 Commands", callback_data="my_commands:view:all")],
@@ -78,11 +174,9 @@ def get_reply_keyboard():
 
 # --- User Preferences (Stub) ---
 def get_user_preferences(user_id):
-    # TODO: Replace with real DB lookup
     return {"risk_profile": "medium", "trading_style": "swing"}
 
 def update_user_activity(user_id, action):
-    # TODO: Log user activity to DB
     pass
 
 # --- Send Personal Message ---
@@ -117,33 +211,13 @@ async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT
     loading_msg = "⏳ Loading your data..."
 
     async def safe_api_call(endpoint, retries=1):
-        for attempt in range(retries + 1):
-            try:
-                logger.info(f"Making API call: {endpoint} (attempt {attempt+1})")
-                return await api_service.make_api_call(endpoint)
-            except httpx.TimeoutException:
-                logger.warning(f"Timeout on {endpoint} (attempt {attempt+1})")
-                if attempt == retries:
-                    return 'timeout'
-            except httpx.RequestError as e:
-                logger.error(f"Request error on {endpoint}: {e}")
-                return 'request_error'
-            except Exception as e:
-                logger.error(f"General error on {endpoint}: {e}")
-                return str(e)
-        return None
+        return await safe_api_call_with_retry(endpoint, retries)
 
     if action == "my_signals":
         await query.edit_message_text(loading_msg)
-        result = await safe_api_call("/api/signals", retries=1)
-        if result == 'timeout':
-            await query.edit_message_text("⏳ The signal service is taking too long to respond. Please try again in a few minutes.")
-            return
-        if result == 'request_error':
-            await query.edit_message_text("🌐 Could not connect to the signal service. Please check your connection and try again.")
-            return
-        if isinstance(result, str):
-            await query.edit_message_text(f"❌ Error fetching signals: {result}")
+        result = await safe_api_call("/api/signals", retries=2)
+        if result is None:
+            await query.edit_message_text("🔧 Local API server is not running. Please start the server and try again.")
             return
         response_data = result
         if not response_data:
@@ -160,15 +234,9 @@ async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(formatted_signals, parse_mode='Markdown')
     elif action == "my_trades":
         await query.edit_message_text(loading_msg)
-        result = await safe_api_call("/api/trades", retries=1)
-        if result == 'timeout':
-            await query.edit_message_text("⏳ The trade history service is taking too long to respond. Please try again in a few minutes.")
-            return
-        if result == 'request_error':
-            await query.edit_message_text("🌐 Could not connect to the trade history service. Please check your connection and try again.")
-            return
-        if isinstance(result, str):
-            await query.edit_message_text(f"❌ Error fetching trade history: {result}")
+        result = await safe_api_call("/api/trades", retries=2)
+        if result is None:
+            await query.edit_message_text("🔧 Local API server is not running. Please start the server and try again.")
             return
         data = result
         if not data:
@@ -203,15 +271,9 @@ async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(f"📜 *Available Commands*\n\n{commands_list}", parse_mode='Markdown')
     elif action == "my_settings":
         await query.edit_message_text(loading_msg)
-        result = await safe_api_call(f"/api/settings?telegram_id={user_id}", retries=1)
-        if result == 'timeout':
-            await query.edit_message_text("⏳ The settings service is taking too long to respond. Please try again in a few minutes.")
-            return
-        if result == 'request_error':
-            await query.edit_message_text("🌐 Could not connect to the settings service. Please check your connection and try again.")
-            return
-        if isinstance(result, str):
-            await query.edit_message_text(f"❌ Error fetching settings: {result}")
+        result = await safe_api_call(f"/api/settings?telegram_id={user_id}", retries=2)
+        if result is None:
+            await query.edit_message_text("🔧 Local API server is not running. Please start the server and try again.")
             return
         data = result
         if not data:
@@ -225,15 +287,9 @@ async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(settings_text, parse_mode='Markdown')
     elif action == "my_help":
         await query.edit_message_text(loading_msg)
-        result = await safe_api_call(f"/api/help?telegram_id={user_id}", retries=1)
-        if result == 'timeout':
-            await query.edit_message_text("⏳ The help service is taking too long to respond. Please try again in a few minutes.")
-            return
-        if result == 'request_error':
-            await query.edit_message_text("🌐 Could not connect to the help service. Please check your connection and try again.")
-            return
-        if isinstance(result, str):
-            await query.edit_message_text(f"❌ Error fetching help info: {result}")
+        result = await safe_api_call(f"/api/help?telegram_id={user_id}", retries=2)
+        if result is None:
+            await query.edit_message_text("🔧 Local API server is not running. Please start the server and try again.")
             return
         data = result
         if not data or 'message' not in data:
@@ -261,53 +317,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_personal_menu(update, context)
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Send loading message
-    loading_msg = await update.message.reply_text("🔄 Fetching latest signals...")
-    
+    loading_msg = await update.message.reply_text("🔍 Fetching latest signals...")
     try:
-        response_data = await api_service.make_api_call("/api/signals")
-        
-        # This part will now only be reached on success (200 OK)
-        formatted_signals = "📊 **Latest Trading Signals**\n\n"
-        for signal in response_data:
-            formatted_signals += (
-                f"🔹 **{signal['pair']}** ({signal['strategy']})\n"
-                f"   Entry: `{signal['entry_range']}` | SL: `{signal.get('stop_loss', 'N/A')}` | TP: `{signal.get('take_profit', 'N/A')}`\n"
-                f"   Confidence: **{signal['confidence']}** | R:R: `{signal.get('risk_reward_ratio', 'N/A')}`\n\n"
-            )
-        
-        formatted_signals += "✅ *Signals updated*"
-        await loading_msg.edit_text(formatted_signals, parse_mode='Markdown')
-        
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            await loading_msg.edit_text("📊 No new signals found. The market is quiet. Check back later!")
-        elif e.response.status_code == 503:
-            await loading_msg.edit_text("⚠️ The signal service is temporarily unavailable. Please try again in a few minutes.")
-        else:
-            await loading_msg.edit_text("❌ A server error occurred. Please try again later.")
-    except httpx.RequestError:
-        await loading_msg.edit_text("🌐 Could not connect to the server. Please check your connection and try again.")
-    except Exception:
-        await loading_msg.edit_text("An unexpected error occurred. Please try again.")
+        data = await safe_api_call_with_retry("/api/signals")
+        if not data:
+            await loading_msg.edit_text("😕 Could not fetch signals. The API server may be unavailable. Please try again later.")
+            return
+        response = "📊 **Latest Forex Signals**\n\n"
+        for signal in data:
+            response += f"**{signal['pair']}** - {signal['strategy']}\n"
+            response += f"Entry: `{signal['entry_range']}`\n"
+            response += f"SL: `{signal['stop_loss']}` | TP: `{signal['take_profit']}`\n"
+            response += f"Confidence: {signal['confidence']} | R:R {signal['risk_reward_ratio']}\n\n"
+        response += "⚠️ **Risk Warning:** This is not financial advice. Always do your own analysis."
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in signals command: {e}")
+        await loading_msg.edit_text("😕 An error occurred while fetching signals. Please try again later.")
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Please specify a currency pair. Example: `/market EURUSD`")
         return
-    
     pair = context.args[0].upper()
-    
-    # Send loading message
     loading_msg = await update.message.reply_text(f"🔄 Fetching market data for {pair}...")
-    
     try:
         data = await api_service.make_api_call(f"/api/market/{pair}")
-        
         if not data:
             await loading_msg.edit_text(f"📉 Sorry, market data for **{pair}** is currently unavailable.")
             return
-
         response_text = (
             f"📈 **Market Data for {data['pair']}**\n\n"
             f"**Price:** `{data['price']:,.5f}`\n"
@@ -316,43 +354,31 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"**Day's Low:** `{data.get('low', 'N/A'):,.5f}`\n\n"
             f"✅ *Data updated*"
         )
-        
         await loading_msg.edit_text(response_text, parse_mode='Markdown')
-        
     except Exception as e:
         error_msg = f"❌ Could not fetch market data for {pair}. Please try again later."
         if "timeout" in str(e).lower():
             error_msg = "⚠️ Connection timeout - please try again in a few seconds"
         elif "404" in str(e):
             error_msg = f"❌ Currency pair {pair} not supported"
-        
         await loading_msg.edit_text(error_msg)
 
 async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Please specify a currency pair. Example: `/analysis EURUSD`")
         return
-    
     pair = context.args[0].upper()
-    
-    # Get market data for analysis
     data = await api_service.make_api_call(f"/api/market/{pair}")
     if not data:
         await update.message.reply_text(f"📉 Sorry, market data for **{pair}** is currently unavailable.")
         return
-
-    # Simple technical analysis based on available data
     price = data.get('price', 0)
     high = data.get('high', price)
     low = data.get('low', price)
     open_price = data.get('open', price)
-    
-    # Calculate basic indicators
     daily_range = high - low if high and low else 0
     price_change = price - open_price if open_price else 0
     price_change_pct = (price_change / open_price * 100) if open_price else 0
-    
-    # Determine trend
     if price_change > 0:
         trend = "🟢 BULLISH"
         trend_emoji = "📈"
@@ -362,7 +388,6 @@ async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         trend = "🟡 NEUTRAL"
         trend_emoji = "➡️"
-    
     analysis_text = (
         f"📊 **Technical Analysis: {pair}**\n\n"
         f"**Current Price:** `{price:,.5f}`\n"
@@ -373,7 +398,6 @@ async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**Resistance:** `{high:,.5f}`\n\n"
         f"💡 *This is a basic analysis. For advanced indicators, use our web platform.*"
     )
-    
     await update.message.reply_text(analysis_text, parse_mode='Markdown')
 
 async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -390,36 +414,26 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
         return
-    
     pair, risk_percent_str, sl_pips_str = context.args[0], context.args[1], context.args[2]
-    
-    # Validate inputs
     try:
         risk_percent = float(risk_percent_str)
         sl_pips = float(sl_pips_str)
     except ValueError:
         await update.message.reply_text("❌ Invalid numbers. Please use valid numbers for risk % and stop loss pips.")
         return
-    
     if risk_percent <= 0 or risk_percent > 10:
         await update.message.reply_text("⚠️ Risk percentage should be between 0.1% and 10% for safety.")
         return
-    
     if sl_pips <= 0:
         await update.message.reply_text("❌ Stop loss pips must be greater than 0.")
         return
-    
-    # Send loading message
     loading_msg = await update.message.reply_text("🔄 Calculating position size...")
-    
     try:
         data = await api_service.make_api_call(f"/api/risk/{pair}/{risk_percent}/{sl_pips}")
-        
         if not data or "error" in data:
             error_msg = data.get("error", "😕 Calculation failed. Please check your inputs or try again.")
             await loading_msg.edit_text(f"❌ {error_msg}")
             return
-        
         response = (
             f"🛡️ **Risk Calculation**\n\n"
             f"💰 **Account Balance:** `${data['account_balance']:,.2f}`\n"
@@ -429,16 +443,13 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ **`{data['position_size_lots']:.2f}` lots**\n\n"
             f"💡 *This position size ensures you risk exactly {data['risk_percent']}% of your account*"
         )
-        
         await loading_msg.edit_text(response, parse_mode='Markdown')
-        
     except Exception as e:
         error_msg = "❌ Could not calculate position size. Please try again later."
         if "timeout" in str(e).lower():
             error_msg = "⚠️ Calculation timeout - please try again"
         elif "404" in str(e):
             error_msg = "❌ Currency pair not supported"
-        
         await loading_msg.edit_text(error_msg)
 
 async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,30 +465,24 @@ async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
         return
-
     pair = context.args[0].upper()
     try:
         trade_size = float(context.args[1])
     except ValueError:
         await update.message.reply_text("❌ Invalid trade size. Please enter a valid number.")
         return
-
     if trade_size <= 0:
         await update.message.reply_text("❌ Trade size must be greater than 0.")
         return
-
     loading_msg = await update.message.reply_text("🔄 Calculating pip value...")
-
     try:
         data = await api_service.make_api_call(f"/api/pipcalc/{pair}/{trade_size}")
         if not data or "error" in data:
             error_msg = data.get("error", "Could not calculate pip value.")
             await loading_msg.edit_text(f"❌ {error_msg}")
             return
-
         pip_value = data['pip_value_usd']
         contract_size = trade_size * 100000
-
         pip_movements = {
             "1 pip": pip_value * 1,
             "5 pips": pip_value * 5,
@@ -486,9 +491,7 @@ async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "50 pips": pip_value * 50,
             "100 pips": pip_value * 100,
         }
-        
         table = "\n".join([f"• {pips} = ${value:,.2f}" for pips, value in pip_movements.items()])
-
         response = (
             f"📏 **Pip Calculator - {data['pair']}**\n\n"
             f"💰 **Trade Size:** `{data['trade_size']}` lots ({int(contract_size):,} units)\n"
@@ -496,9 +499,7 @@ async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"**Pip Movement Table:**\n{table}\n\n"
             f"💡 *Each pip movement is worth ${pip_value:,.2f} of profit or loss.*"
         )
-
         await loading_msg.edit_text(response, parse_mode='Markdown')
-
     except Exception as e:
         await loading_msg.edit_text("❌ An unexpected error occurred. Please try again.")
 
@@ -506,45 +507,30 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(donation_message, parse_mode='Markdown', disable_web_page_preview=True)
     
 async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Send loading message
-    loading_msg = await update.message.reply_text("🔄 Fetching trade history...")
-    
+    loading_msg = await update.message.reply_text("📋 Fetching trade history...")
     try:
-        data = await api_service.make_api_call("/api/trades")
-        
+        data = await safe_api_call_with_retry("/api/trades")
         if not data:
-            await loading_msg.edit_text("📊 No trades found in your history.")
+            await loading_msg.edit_text("😕 Could not fetch trades. The API server may be unavailable. Please try again later.")
             return
-        
-        response = "📊 **Recent Trades**\n\n"
-        for trade in data[:10]:  # Show last 10 trades
-            status_emoji = "🟢" if trade.status == "closed" else "🟡"
-            response += (
-                f"{status_emoji} **{trade.symbol}** ({trade.order_type.upper()})\n"
-                f"   Entry: `{trade.entry_price}` | Status: `{trade.status}`\n"
-            )
-            if trade.close_price:
-                response += f"   Exit: `{trade.close_price}` | P&L: `${trade.pnl:.2f}`\n"
-            response += "\n"
-        
-        response += "✅ *Trade history updated*"
+        response = "📊 **Trade History**\n\n"
+        for trade in data:
+            status_emoji = "✅" if trade['status'] == 'closed' else "⏳"
+            pnl_text = f"${trade['pnl']:.2f}" if trade['pnl'] is not None else "N/A"
+            response += f"{status_emoji} **{trade['symbol']}** ({trade['order_type'].upper()})\n"
+            response += f"Entry: `{trade['entry_price']}`"
+            if trade['close_price']:
+                response += f" | Exit: `{trade['close_price']}`"
+            response += f"\nP&L: `{pnl_text}` | Status: {trade['status'].title()}\n\n"
         await loading_msg.edit_text(response, parse_mode='Markdown')
-        
     except Exception as e:
-        error_msg = "❌ Could not fetch trade history. Please try again later."
-        if "timeout" in str(e).lower():
-            error_msg = "⚠️ Connection timeout - please try again in a few seconds"
-        elif "404" in str(e):
-            error_msg = "📊 No trade history available yet"
-        elif "401" in str(e):
-            error_msg = "🔒 Authentication required - please reconnect your account"
-        
-        await loading_msg.edit_text(error_msg)
+        logger.error(f"Error in trades command: {e}")
+        await loading_msg.edit_text("😕 An error occurred while fetching trades. Please try again later.")
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = await api_service.make_api_call("/api/strategies")
+    data = await safe_api_call_with_retry("/api/strategies")
     if not data:
-        await update.message.reply_text("😕 Could not fetch strategies. Please try again later.")
+        await update.message.reply_text("😕 Could not fetch strategies. The API server may be unavailable. Please try again later.")
         return
     
     response = "📚 **Trading Strategies**\n\n"
@@ -555,42 +541,377 @@ async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(response, parse_mode='Markdown')
 
+# --- MT5 Trading Commands ---
+
+async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Connect to MT5 - prompts for login, password, server"""
+    if not context.args or len(context.args) < 3:
+        help_text = (
+            "🔗 **MT5 Connection Help:**\n\n"
+            "**Format:** `/connect [login] [password] [server]`\n"
+            "**Example:** `/connect 12345678 mypassword MetaQuotes-Demo`\n\n"
+            "💡 *Your credentials are encrypted and secure*"
+        )
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+        return
+    
+    login, password, server = context.args[0], context.args[1], context.args[2]
+    loading_msg = await update.message.reply_text("🔗 Connecting to MT5...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/connect", method="POST", json={
+            "login": login,
+            "password": password,
+            "server": server
+        })
+        
+        if data and data.get("success"):
+            await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
+        else:
+            error_msg = data.get("error", "Connection failed. Please check your credentials.")
+            await loading_msg.edit_text(f"❌ **Connection Failed:** {error_msg}")
+            
+    except Exception as e:
+        await loading_msg.edit_text("❌ Connection error. Please try again.")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check MT5 connection status"""
+    loading_msg = await update.message.reply_text("🔍 Checking MT5 status...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/status")
+        
+        if data and data.get("connected"):
+            account_info = data.get("account", {})
+            response = (
+                f"✅ **MT5 Connected**\n\n"
+                f"**Account:** {account_info.get('login', 'N/A')}\n"
+                f"**Server:** {account_info.get('server', 'N/A')}\n"
+                f"**Balance:** ${account_info.get('balance', 0):,.2f}\n"
+                f"**Equity:** ${account_info.get('equity', 0):,.2f}"
+            )
+        else:
+            response = "❌ **MT5 Not Connected**\n\nUse `/connect` to establish connection."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error checking status. Please try again.")
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show account balance"""
+    loading_msg = await update.message.reply_text("💰 Fetching account balance...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/balance")
+        
+        if data:
+            response = (
+                f"💰 **Account Balance**\n\n"
+                f"**Balance:** ${data.get('balance', 0):,.2f}\n"
+                f"**Equity:** ${data.get('equity', 0):,.2f}\n"
+                f"**Margin:** ${data.get('margin', 0):,.2f}\n"
+                f"**Free Margin:** ${data.get('free_margin', 0):,.2f}\n"
+                f"**Margin Level:** {data.get('margin_level', 0):,.2f}%"
+            )
+        else:
+            response = "❌ Could not fetch balance. Check MT5 connection."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error fetching balance. Please try again.")
+
+async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show detailed account info"""
+    loading_msg = await update.message.reply_text("📊 Fetching account info...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/account")
+        
+        if data:
+            response = (
+                f"📊 **Account Information**\n\n"
+                f"**Login:** {data.get('login', 'N/A')}\n"
+                f"**Server:** {data.get('server', 'N/A')}\n"
+                f"**Balance:** ${data.get('balance', 0):,.2f}\n"
+                f"**Equity:** ${data.get('equity', 0):,.2f}\n"
+                f"**Margin:** ${data.get('margin', 0):,.2f}\n"
+                f"**Free Margin:** ${data.get('free_margin', 0):,.2f}\n"
+                f"**Margin Level:** {data.get('margin_level', 0):,.2f}%\n"
+                f"**Currency:** {data.get('currency', 'N/A')}"
+            )
+        else:
+            response = "❌ Could not fetch account info. Check MT5 connection."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error fetching account info. Please try again.")
+
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Buy market order"""
+    if len(context.args) < 2:
+        help_text = (
+            "📈 **Buy Market Order Help:**\n\n"
+            "**Format:** `/buy [symbol] [lot] [sl] [tp]`\n"
+            "**Examples:**\n"
+            "• `/buy EURUSD 0.1` - Buy 0.1 lot EURUSD\n"
+            "• `/buy GBPUSD 0.05 1.2500 1.2700` - With SL and TP\n\n"
+            "💡 *Use 5-digit prices, decimal lots (0.01, 0.1, 1.0)*"
+        )
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+        return
+    
+    symbol = context.args[0].upper()
+    try:
+        lot = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid lot size. Please enter a valid number.")
+        return
+    
+    sl = float(context.args[2]) if len(context.args) > 2 else None
+    tp = float(context.args[3]) if len(context.args) > 3 else None
+    
+    loading_msg = await update.message.reply_text(f"📈 Placing buy order for {symbol}...")
+    
+    try:
+        order_data = {
+            "symbol": symbol,
+            "lot": lot,
+            "type": "buy"
+        }
+        if sl:
+            order_data["sl"] = sl
+        if tp:
+            order_data["tp"] = tp
+        
+        data = await api_service.make_api_call("/api/mt5/order", method="POST", json=order_data)
+        
+        if data and data.get("success"):
+            ticket = data.get("ticket", "N/A")
+            await loading_msg.edit_text(f"✅ **Buy Order Placed Successfully!**\n\n**Ticket:** {ticket}\n**Symbol:** {symbol}\n**Lot:** {lot}")
+    else:
+            error_msg = data.get("error", "Order failed. Please check your inputs.")
+            await loading_msg.edit_text(f"❌ **Order Failed:** {error_msg}")
+            
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error placing order. Please try again.")
+
+async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sell market order"""
+    if len(context.args) < 2:
+        help_text = (
+            "📉 **Sell Market Order Help:**\n\n"
+            "**Format:** `/sell [symbol] [lot] [sl] [tp]`\n"
+            "**Examples:**\n"
+            "• `/sell EURUSD 0.1` - Sell 0.1 lot EURUSD\n"
+            "• `/sell GBPUSD 0.05 1.2700 1.2500` - With SL and TP\n\n"
+            "💡 *Use 5-digit prices, decimal lots (0.01, 0.1, 1.0)*"
+        )
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+        return
+    
+    symbol = context.args[0].upper()
+    try:
+        lot = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid lot size. Please enter a valid number.")
+        return
+    
+    sl = float(context.args[2]) if len(context.args) > 2 else None
+    tp = float(context.args[3]) if len(context.args) > 3 else None
+    
+    loading_msg = await update.message.reply_text(f"📉 Placing sell order for {symbol}...")
+    
+    try:
+        order_data = {
+            "symbol": symbol,
+            "lot": lot,
+            "type": "sell"
+        }
+        if sl:
+            order_data["sl"] = sl
+        if tp:
+            order_data["tp"] = tp
+        
+        data = await api_service.make_api_call("/api/mt5/order", method="POST", json=order_data)
+        
+        if data and data.get("success"):
+            ticket = data.get("ticket", "N/A")
+            await loading_msg.edit_text(f"✅ **Sell Order Placed Successfully!**\n\n**Ticket:** {ticket}\n**Symbol:** {symbol}\n**Lot:** {lot}")
+        else:
+            error_msg = data.get("error", "Order failed. Please check your inputs.")
+            await loading_msg.edit_text(f"❌ **Order Failed:** {error_msg}")
+            
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error placing order. Please try again.")
+
+async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show open positions"""
+    loading_msg = await update.message.reply_text("📊 Fetching open positions...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/positions")
+        
+        if data and len(data) > 0:
+            response = "📊 **Open Positions**\n\n"
+            for pos in data:
+                pnl = pos.get('profit', 0)
+                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                response += (
+                    f"{pnl_emoji} **{pos['symbol']}** ({pos['type'].upper()})\n"
+                    f"**Ticket:** {pos['ticket']} | **Lot:** {pos['lot']}\n"
+                    f"**Entry:** {pos['price_open']} | **Current:** {pos.get('price_current', 'N/A')}\n"
+                    f"**P&L:** ${pnl:,.2f}\n\n"
+                )
+        else:
+            response = "📊 **No Open Positions**\n\nNo active trades at the moment."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error fetching positions. Please try again.")
+
+async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show pending orders"""
+    loading_msg = await update.message.reply_text("⏳ Fetching pending orders...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/orders")
+        
+        if data and len(data) > 0:
+            response = "⏳ **Pending Orders**\n\n"
+            for order in data:
+                response += (
+                    f"📋 **{order['symbol']}** ({order['type'].upper()})\n"
+                    f"**Ticket:** {order['ticket']} | **Lot:** {order['lot']}\n"
+                    f"**Price:** {order['price']}\n\n"
+                )
+        else:
+            response = "⏳ **No Pending Orders**\n\nNo pending orders at the moment."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error fetching orders. Please try again.")
+
+async def close(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Close specific position"""
+    if not context.args:
+        help_text = (
+            "❌ **Close Position Help:**\n\n"
+            "**Format:** `/close [ticket]`\n"
+            "**Example:** `/close 12345678`\n\n"
+            "💡 *Use `/positions` to see ticket numbers*"
+        )
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+        return
+    
+    try:
+        ticket = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid ticket number. Please enter a valid number.")
+        return
+    
+    loading_msg = await update.message.reply_text(f"❌ Closing position {ticket}...")
+    
+    try:
+        data = await api_service.make_api_call(f"/api/mt5/close/{ticket}", method="POST")
+        
+        if data and data.get("success"):
+            await loading_msg.edit_text(f"✅ **Position Closed Successfully!**\n\n**Ticket:** {ticket}")
+        else:
+            error_msg = data.get("error", "Failed to close position.")
+            await loading_msg.edit_text(f"❌ **Close Failed:** {error_msg}")
+            
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error closing position. Please try again.")
+
+async def closeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Close all positions"""
+    loading_msg = await update.message.reply_text("❌ Closing all positions...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/closeall", method="POST")
+        
+        if data and data.get("success"):
+            closed_count = data.get("closed_count", 0)
+            await loading_msg.edit_text(f"✅ **All Positions Closed!**\n\n**Closed:** {closed_count} positions")
+        else:
+            error_msg = data.get("error", "Failed to close positions.")
+            await loading_msg.edit_text(f"❌ **Close Failed:** {error_msg}")
+            
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error closing positions. Please try again.")
+
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get current price for symbol"""
+    if not context.args:
+        help_text = (
+            "💰 **Price Check Help:**\n\n"
+            "**Format:** `/price [symbol]`\n"
+            "**Examples:**\n"
+            "• `/price EURUSD`\n"
+            "• `/price GBPUSD`\n\n"
+            "💡 *Use `/symbols` to see available symbols*"
+        )
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+        return
+    
+    symbol = context.args[0].upper()
+    loading_msg = await update.message.reply_text(f"💰 Fetching price for {symbol}...")
+    
+    try:
+        data = await api_service.make_api_call(f"/api/mt5/price/{symbol}")
+        
+        if data:
+            response = (
+                f"💰 **{symbol} Current Price**\n\n"
+                f"**Bid:** {data.get('bid', 'N/A')}\n"
+                f"**Ask:** {data.get('ask', 'N/A')}\n"
+                f"**Spread:** {data.get('spread', 'N/A')} pips"
+            )
+        else:
+            response = f"❌ Could not fetch price for {symbol}."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error fetching price. Please try again.")
+
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trading summary"""
+    loading_msg = await update.message.reply_text("📊 Generating trading summary...")
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/summary")
+        
+        if data:
+            response = (
+                f"📊 **Trading Summary**\n\n"
+                f"**Total P&L:** ${data.get('total_pnl', 0):,.2f}\n"
+                f"**Open Positions:** {data.get('open_positions', 0)}\n"
+                f"**Pending Orders:** {data.get('pending_orders', 0)}\n"
+                f"**Balance:** ${data.get('balance', 0):,.2f}\n"
+                f"**Equity:** ${data.get('equity', 0):,.2f}"
+            )
+        else:
+            response = "❌ Could not fetch trading summary."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        await loading_msg.edit_text("❌ Error fetching summary. Please try again.")
+
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_personal_menu(update, context)
-
-async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_personal_menu(update, context)
-
-# --- Persistent Reply Keyboard Handler ---
-async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == "📋 Menu":
-        await show_personal_menu(update, context)
-
-# --- Button Handler (Route to Personal or Old) ---
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.data.startswith("my_"):
-        await handle_personal_callback(update, context)
-        return
-    await query.answer()
-    COMMAND_MAP = {
-        'signals': signals,
-        'market_menu': lambda u,c: u.message.reply_text("To get market data, use the command: `/market [PAIR]`"),
-        'tools_menu': lambda u,c: u.message.reply_text("Available tools:\n`/risk [PAIR] [RISK%] [SL PIPS]`\n`/pipcalc [PAIR] [SIZE]`"),
-        'donate': donate,
-        'help': help_command,
-    }
-    if query.data in COMMAND_MAP:
-        await COMMAND_MAP[query.data](query, context)
-    else:
-        await query.edit_message_text(text=f"Coming soon: {query.data}")
 
 def setup_handlers(app: Application):
     """Sets up all the command and message handlers for the bot."""
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('menu', menu_command))
-    app.add_handler(CommandHandler('commands', commands_command))
     app.add_handler(CommandHandler('signals', signals))
     app.add_handler(CommandHandler('market', market))
     app.add_handler(CommandHandler('analysis', analysis))
@@ -599,56 +920,128 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('donate', donate))
     app.add_handler(CommandHandler('trades', trades))
     app.add_handler(CommandHandler('strategies', strategies))
+    
+    # MT5 Trading Commands
+    app.add_handler(CommandHandler('connect', connect))
+    app.add_handler(CommandHandler('status', status))
+    app.add_handler(CommandHandler('balance', balance))
+    app.add_handler(CommandHandler('account', account))
+    app.add_handler(CommandHandler('buy', buy))
+    app.add_handler(CommandHandler('sell', sell))
+    app.add_handler(CommandHandler('positions', positions))
+    app.add_handler(CommandHandler('orders', orders))
+    app.add_handler(CommandHandler('close', close))
+    app.add_handler(CommandHandler('closeall', closeall))
+    app.add_handler(CommandHandler('price', price))
+    app.add_handler(CommandHandler('summary', summary))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(TFilters.TEXT & (~TFilters.COMMAND), reply_keyboard_handler))
 
-bot = telebot.TeleBot(os.getenv("TELEGRAM_FOREX_BOT_TOKEN"))
-cred_mgr = CredentialManager("forex_bot.db", "eKnjQbB073B0TfMthgsOzoGPo9w1xjgBOM-eWl8hGq4=")
-mt5_mgr = MT5Manager()
+async def run_network_diagnostics():
+    """Run comprehensive network diagnostics."""
+    logger.info("Running network diagnostics...")
+    diagnostics = {
+        "internet": check_internet_connectivity(),
+        "telegram_api": check_telegram_api(),
+        "local_server": check_local_server(),
+        "api_connectivity": await test_api_connectivity()
+    }
+    logger.info(f"Network diagnostics: {diagnostics}")
+    if not diagnostics["internet"]:
+        logger.error("❌ No internet connection detected")
+    if not diagnostics["telegram_api"]:
+        logger.error("❌ Cannot resolve api.telegram.org - DNS issue detected")
+    if not diagnostics["local_server"]:
+        logger.warning("⚠️ Local API server is not running on port 8001")
+    if not diagnostics["api_connectivity"]:
+        logger.warning("⚠️ Local API server is not responding to health checks")
+    return diagnostics
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(message.chat.id, "Welcome! Use /connect to link your MT5 account.")
+def start_bot():
+    global application
+        try:
+        logger.info("Starting bot...")
+            
+        diagnostics = run_async_safely(run_network_diagnostics())
+            if not diagnostics["internet"]:
+                logger.error("Network diagnostics failed. Please check your connection.")
+                    return False
+            
+            application = ApplicationBuilder().token("8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY").build()
+            
+            async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+                logger.error(f"Exception while handling an update: {context.error}")
+            
+            application.add_error_handler(error_handler)
+            setup_handlers(application)
+            
+            logger.info("✅ Bot started successfully!")
+        # Synchronous, blocking call
+        application.run_polling(timeout=TELEGRAM_API_TIMEOUT)
+        return True
+            
+        except Exception as e:
+        logger.error(f"Error starting bot: {e}")
+                return False
 
-@bot.message_handler(commands=['connect'])
-def connect(message):
-    # Placeholder: In production, ask for login, password, server interactively
-    bot.send_message(message.chat.id, "Please send your MT5 login, password, and server (format: login,password,server)")
-    bot.register_next_step_handler(message, process_credentials)
+async def shutdown_bot():
+    """Properly shutdown the bot application."""
+    global application
+    if application:
+        try:
+            logger.info("🛑 Shutting down bot...")
+            if application.running:
+            await application.stop()
+                await application.shutdown()
+            logger.info("✅ Bot shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during bot shutdown: {e}")
+        finally:
+            application = None
 
-def process_credentials(message):
+def signal_handler(signum, frame):
+    """Handle shutdown signals."""
+    logger.info(f"Received signal {signum}, initiating shutdown...")
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        loop.create_task(shutdown_bot())
+    else:
+        asyncio.run(shutdown_bot())
+
+def main():
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger.info("🚀 Starting Forex Trading Bot...")
+    
+    # Add signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
-        login, password, server = message.text.split(",")
-        cred_mgr.store_credentials(message.from_user.id, login, password, server)
-        success, msg = mt5_mgr.connect(message.from_user.id, login, password, server)
-        if success:
-            bot.send_message(message.chat.id, "Connected to your MT5 account!")
-        else:
-            bot.send_message(message.chat.id, f"Connection failed: {msg}")
+        success = start_bot()
+        if not success:
+            logger.error("Failed to start bot.")
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
     except Exception as e:
-        bot.send_message(message.chat.id, f"Error: {e}")
-
-@bot.message_handler(commands=['account'])
-def account(message):
-    creds = cred_mgr.get_credentials(message.from_user.id)
-    if not creds:
-        bot.send_message(message.chat.id, "No credentials found. Use /connect first.")
-        return
-    if not mt5_mgr.is_connected(message.from_user.id):
-        bot.send_message(message.chat.id, "Not connected. Use /connect.")
-        return
-    # Placeholder: Fetch and display account info from MT5
-    bot.send_message(message.chat.id, "[Account info will be shown here]")
-
-@bot.message_handler(commands=['disconnect'])
-def disconnect(message):
-    mt5_mgr.disconnect(message.from_user.id)
-    bot.send_message(message.chat.id, "Disconnected from MT5 account.")
-
-@bot.message_handler(commands=['status'])
-def status(message):
-    connected = mt5_mgr.is_connected(message.from_user.id)
-    bot.send_message(message.chat.id, f"MT5 connection status: {'Connected' if connected else 'Not connected'}")
+        logger.error(f"Fatal error: {e}")
+        logger.error("Please check:")
+        logger.error("1. Internet connection")
+        logger.error("2. DNS settings (try 8.8.8.8 or 1.1.1.1)")
+        logger.error("3. Local API server is running on http://127.0.0.1:8001")
+        logger.error("4. Firewall/antivirus is not blocking Python")
+        logger.error("5. Bot token is valid")
+    finally:
+        try:
+            if application:
+                run_async_safely(shutdown_bot())
+        except Exception as e:
+            logger.error(f"Error during final shutdown: {e}")
+        tracemalloc.stop()
+        logger.info("Tracemalloc stopped")
 
 if __name__ == "__main__":
-    bot.polling()
+    main()

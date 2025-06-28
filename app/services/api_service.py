@@ -39,6 +39,9 @@ class ApiService:
         except httpx.TimeoutException:
             logger.error(f"API Timeout: The request to {url} timed out.")
             # return {"error": "The request to the server timed out. Please try again."}
+        except httpx.ConnectError as e:
+            logger.error(f"Connection Error: Cannot connect to {url}. Local server may not be running.")
+            # return {"error": "Cannot connect to local server. Please start the server first."}
         except httpx.RequestError as e:
             logger.error(f"Request Error: An error occurred while requesting {url}. Details: {e}")
         except Exception as e:
@@ -48,5 +51,5 @@ class ApiService:
 
 # Initialize with an environment variable, providing a default for local development
 # The RENDER_EXTERNAL_URL is provided by Render, so we can use it to construct the API URL
-API_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8000")
+API_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8001")
 api_service = ApiService(base_url=API_BASE_URL) 

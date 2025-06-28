@@ -2,20 +2,12 @@ import MetaTrader5 as mt5
 import pandas as pd
 import time
 import logging
-import sys
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 # Add the app directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'app'))
-
-try:
-    from app.services.strategy_engine import order_block_rsi_fib_strategy
-except ImportError as e:
-    print(f"Warning: Could not import strategy engine: {e}")
-    # Fallback strategy function
-    def order_block_rsi_fib_strategy(df):
-        return {'signal': None, 'confidence': 0, 'strategy': 'Fallback Strategy'}
 
 # --- CONFIGURATION ---
 ACCOUNT = 94067211
@@ -35,7 +27,7 @@ logging.basicConfig(
     filename="mt5_trading_bot.log",
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    filemode='a' # Append to the log file
+    filemode='a'
 )
 
 def log(msg):
@@ -43,12 +35,56 @@ def log(msg):
     print(msg)
     logging.info(msg)
 
+# --- SIMPLE STRATEGY (No external dependencies) ---
+def calculate_rsi(series, period=14):
+    """Calculate RSI indicator."""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def simple_strategy(df):
+    """Simple RSI-based strategy that doesn't require external modules."""
+    if len(df) < 50:
+        return {'signal': None, 'confidence': 0, 'strategy': 'Insufficient data'}
+    
+    try:
+        rsi = calculate_rsi(df['close'], 14)
+        current_rsi = rsi.iloc[-1]
+        
+        # Simple RSI strategy
+        if current_rsi < 30:
+            return {
+                'signal': 'buy', 
+                'confidence': 70, 
+                'strategy': 'RSI Oversold',
+                'entry_zone': df['close'].iloc[-1],
+                'stop_loss': df['close'].iloc[-1] - 0.0020,
+                'take_profit': df['close'].iloc[-1] + 0.0040
+            }
+        elif current_rsi > 70:
+            return {
+                'signal': 'sell', 
+                'confidence': 70, 
+                'strategy': 'RSI Overbought',
+                'entry_zone': df['close'].iloc[-1],
+                'stop_loss': df['close'].iloc[-1] + 0.0020,
+                'take_profit': df['close'].iloc[-1] - 0.0040
+            }
+        
+        return {'signal': None, 'confidence': 0, 'strategy': 'No signal'}
+    except Exception as e:
+        log(f"Error in simple strategy: {e}")
+        return {'signal': None, 'confidence': 0, 'strategy': f'Error: {e}'}
+
 # --- MT5 CONNECTION ---
 def connect():
     """Initializes and connects to the MetaTrader 5 terminal."""
     log(f"MT5 package version: {mt5.__version__}")
     
-    # First, shutdown any existing connection
+    # Shutdown any existing connection
     mt5.shutdown()
     time.sleep(2)
     
@@ -71,6 +107,12 @@ def connect():
             if not mt5.initialize(server=SERVER, login=ACCOUNT, password=PASSWORD):
                 error = mt5.last_error()
                 log(f"✗ All connection methods failed. Error: {error}")
+                log("\nTroubleshooting tips:")
+                log("1. Make sure MT5 terminal is installed and running")
+                log("2. Verify your account credentials")
+                log("3. Check if the server name is correct")
+                log("4. Try running MT5 as administrator")
+                log("5. Check if antivirus is blocking the connection")
                 mt5.shutdown()
                 return False
             else:
@@ -86,11 +128,6 @@ def connect():
             error = mt5.last_error()
             log(f"✗ Login failed: {error}")
             log("Please verify your account credentials and server name.")
-            log("Common issues:")
-            log("- Wrong password or account number")
-            log("- Server name mismatch")
-            log("- Account restrictions")
-            log("- Network connectivity issues")
             mt5.shutdown()
             return False
         else:
@@ -112,15 +149,6 @@ def connect():
     log(f"Connected to account #{account_info.login} on {account_info.server}.")
     log(f"Account Balance: ${account_info.balance:.2f}")
     log(f"Account Equity: ${account_info.equity:.2f}")
-    
-    # Test symbol access
-    symbol_info = mt5.symbol_info(SYMBOL)
-    if symbol_info is None:
-        log(f"Warning: Could not get symbol info for {SYMBOL}")
-        log("This might indicate the symbol is not available on your account")
-    else:
-        log(f"Symbol {SYMBOL} is available for trading")
-    
     return True
 
 def shutdown():
@@ -198,7 +226,7 @@ def execute_trade(symbol, signal_type, lot, entry_price, stop_loss, take_profit)
         "tp": tp,
         "deviation": 20,
         "magic": MAGIC,
-        "comment": "Order Block + RSI + Fib Bot",
+        "comment": "Simple RSI Bot",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
@@ -209,37 +237,32 @@ def execute_trade(symbol, signal_type, lot, entry_price, stop_loss, take_profit)
         log(f"Order sent successfully, ticket #{result.order}")
     return result
 
-# --- RISK MANAGEMENT & SESSION FILTERS ---
+# --- RISK MANAGEMENT ---
 trades_today = 0
 max_trades_per_day = 3
 max_daily_loss = 0.10  # 10% drawdown
 initial_balance = ACCOUNT_SIZE
 current_drawdown = 0.0
-from datetime import datetime as dt
 
 def in_trading_session():
-    # TEMP: Allow trading at all times for testing
-    return True
-
-# --- HELPER FUNCTIONS FOR RISK & TRADE MANAGEMENT ---
-def get_pip_value(symbol, lot):
-    info = mt5.symbol_info(symbol)
-    if info is None:
-        return 10.0  # fallback
-    # For most FX pairs, pip = 0.0001, pip value = lot * contract size * pip
-    pip = 0.0001 if info.digits == 5 or info.digits == 4 else 0.01
-    return lot * info.trade_contract_size * pip
+    """Check if current time is within trading session."""
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+    # London: 7-11 GMT, NY: 12-16 GMT
+    return (7 <= hour < 11) or (12 <= hour < 16)
 
 def calculate_lot_size(balance, risk_percent, entry, stop, symbol):
+    """Calculate position size based on risk management."""
     risk_amount = balance * risk_percent
     pip_distance = abs(entry - stop)
-    pip_value_per_lot = get_pip_value(symbol, 1.0)
-    if pip_distance == 0 or pip_value_per_lot == 0:
+    if pip_distance == 0:
         return 0.01  # fallback
-    lot = risk_amount / (pip_distance * pip_value_per_lot)
+    # Simplified lot calculation
+    lot = risk_amount / (pip_distance * 10000)  # Assuming 1 pip = $10 for 1 lot
     return max(0.01, round(lot, 2))
 
 def get_closed_trades_today():
+    """Get closed trades for today."""
     today = datetime.now(timezone.utc).date()
     history = mt5.history_deals_get(datetime(today.year, today.month, today.day), datetime.now(timezone.utc))
     if history is None:
@@ -247,53 +270,18 @@ def get_closed_trades_today():
     return [deal for deal in history if deal.magic == MAGIC]
 
 def get_daily_pnl():
+    """Calculate daily P&L."""
     deals = get_closed_trades_today()
     pnl = sum(deal.profit for deal in deals)
     return pnl
-
-def update_trailing_stop(symbol, signal_type, entry, stop, rr=1.0):
-    positions = mt5.positions_get(symbol=symbol)
-    if not positions:
-        return
-    for pos in positions:
-        if pos.magic != MAGIC:
-            continue
-        # For buy, trail SL to entry after 1:1 RR; for sell, vice versa
-        if signal_type == 'buy':
-            if pos.price_current >= entry + (entry - stop) * rr:
-                if pos.sl < entry:
-                    request = {
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": pos.ticket,
-                        "sl": entry,
-                        "tp": pos.tp,
-                        "symbol": symbol,
-                        "magic": MAGIC,
-                        "comment": "Trailing SL to BE"
-                    }
-                    mt5.order_send(request)
-        elif signal_type == 'sell':
-            if pos.price_current <= entry - (stop - entry) * rr:
-                if pos.sl > entry:
-                    request = {
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": pos.ticket,
-                        "sl": entry,
-                        "tp": pos.tp,
-                        "symbol": symbol,
-                        "magic": MAGIC,
-                        "comment": "Trailing SL to BE"
-                    }
-                    mt5.order_send(request)
 
 # --- MAIN BOT LOOP ---
 def run_bot():
     global trades_today, current_drawdown
     log("Starting MT5 Trading Bot...")
     
-    # Test connection first
     if not connect():
-        log("Failed to connect to MT5. Exiting...")
+        log("Failed to connect to MT5. Exiting.")
         return
 
     try:
@@ -305,33 +293,42 @@ def run_bot():
                     log("Outside trading session. No trades will be taken.")
                     time.sleep(1)
                     continue
+                
                 # Update drawdown and trades_today from closed trades
                 daily_pnl = get_daily_pnl()
                 current_drawdown = -daily_pnl / initial_balance
                 trades_today = len(get_closed_trades_today())
+                
                 if trades_today >= max_trades_per_day:
                     log("Max trades per day reached. No more trades today.")
                     time.sleep(1)
                     continue
+                    
                 if current_drawdown >= max_daily_loss:
                     log("Max daily loss hit. Stopping trading for the day.")
                     time.sleep(1)
                     continue
+                
                 df = get_rates(SYMBOL, TIMEFRAME)
                 if df is not None:
                     try:
-                        strat_result = order_block_rsi_fib_strategy(df)
+                        strat_result = simple_strategy(df)
                         signal = strat_result.get('signal')
                         if signal in ('buy', 'sell'):
                             log(f"=== SIGNAL DETECTED: {signal.upper()} ===")
+                            log(f"Strategy: {strat_result.get('strategy')}")
                             log(f"Entry: {strat_result.get('entry_zone')}, SL: {strat_result.get('stop_loss')}, TP: {strat_result.get('take_profit')}")
+                            
                             close_opposite_positions(SYMBOL, signal)
+                            
                             account_info = mt5.account_info()
                             balance = account_info.balance if account_info else initial_balance
+                            
                             # Dynamic lot sizing
                             lot = calculate_lot_size(
                                 balance, 0.10, strat_result.get('entry_zone'), strat_result.get('stop_loss'), SYMBOL
                             )
+                            
                             result = execute_trade(
                                 SYMBOL, signal, lot,
                                 strat_result.get('entry_zone'),
@@ -345,21 +342,7 @@ def run_bot():
                         log(f"Error in strategy execution: {e}")
                 else:
                     log("Could not retrieve market data.")
-            # Trailing stop management for open trades
-            df = get_rates(SYMBOL, TIMEFRAME)
-            if df is not None:
-                try:
-                    strat_result = order_block_rsi_fib_strategy(df)
-                    signal = strat_result.get('signal')
-                    if signal in ('buy', 'sell'):
-                        update_trailing_stop(
-                            SYMBOL, signal,
-                            strat_result.get('entry_zone'),
-                            strat_result.get('stop_loss'),
-                            rr=1.0
-                        )
-                except Exception as e:
-                    log(f"Error in trailing stop management: {e}")
+            
             time.sleep(1)
 
     except KeyboardInterrupt:

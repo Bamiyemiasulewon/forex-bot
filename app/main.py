@@ -4,6 +4,8 @@ import sys
 import os
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
 # Add project root to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -48,6 +50,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get('/')
 def root():
     return {'message': 'Forex Trading Bot API'}
@@ -58,5 +69,89 @@ app.include_router(telegram_router, tags=["Telegram"])
 @app.get("/health", tags=["Health"])
 def health_check():
     return {"status": "ok", "bot_running": bot_manager.is_running}
+
+@app.get("/api/signals")
+async def get_signals():
+    """Mock signals endpoint for testing."""
+    return [
+        {
+            "pair": "EURUSD",
+            "strategy": "RSI + Fibonacci",
+            "entry_range": "1.0850-1.0860",
+            "stop_loss": "1.0820",
+            "take_profit": "1.0900",
+            "confidence": "High",
+            "risk_reward_ratio": "2.5:1"
+        },
+        {
+            "pair": "GBPUSD",
+            "strategy": "Order Block",
+            "entry_range": "1.2650-1.2660",
+            "stop_loss": "1.2620",
+            "take_profit": "1.2720",
+            "confidence": "Medium",
+            "risk_reward_ratio": "2.0:1"
+        }
+    ]
+
+@app.get("/api/trades")
+async def get_trades():
+    """Mock trades endpoint for testing."""
+    return [
+        {
+            "symbol": "EURUSD",
+            "order_type": "buy",
+            "entry_price": "1.0855",
+            "close_price": "1.0880",
+            "status": "closed",
+            "pnl": 25.0
+        },
+        {
+            "symbol": "GBPUSD",
+            "order_type": "sell",
+            "entry_price": "1.2655",
+            "close_price": None,
+            "status": "open",
+            "pnl": 0.0
+        }
+    ]
+
+@app.get("/api/settings")
+async def get_settings(telegram_id: int = None):
+    """Mock settings endpoint for testing."""
+    return {
+        "preferred_pairs": "EURUSD, GBPUSD, USDJPY",
+        "default_risk": "2.0"
+    }
+
+@app.get("/api/help")
+async def get_help(telegram_id: int = None):
+    """Mock help endpoint for testing."""
+    return {
+        "message": "For support, contact @your_support_bot or email support@yourcompany.com"
+    }
+
+@app.get("/api/strategies")
+async def get_strategies():
+    """Mock strategies endpoint for testing."""
+    return {
+        "strategies": [
+            "RSI + Fibonacci Retracement",
+            "Order Block Trading",
+            "Support/Resistance Breakout",
+            "Moving Average Crossover"
+        ],
+        "message": "These strategies are designed for different market conditions."
+    }
+
+if __name__ == "__main__":
+    print("🚀 Starting Forex Trading Bot API Server...")
+    print("🌐 Server will be available at: http://127.0.0.1:8000")
+    print("📊 Health check: http://127.0.0.1:8000/health")
+    print("📚 API docs: http://127.0.0.1:8000/docs")
+    print("\n💡 Keep this terminal open to keep the server running.")
+    print("   Press Ctrl+C to stop the server.")
+    
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
 
 
