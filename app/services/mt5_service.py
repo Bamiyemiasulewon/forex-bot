@@ -27,27 +27,67 @@ class MT5Service:
     async def connect(self, login: str, password: str, server: str) -> Dict[str, Any]:
         """Connect to MT5 terminal."""
         if not MT5_AVAILABLE:
-            return {"success": False, "error": "MetaTrader5 package not available"}
+            return {"success": False, "error": "MetaTrader5 package not available. Please install: pip install MetaTrader5"}
             
         try:
             logger.info(f"Connecting to MT5: {login}@{server}")
-            MT5_PATH = r"C:\\Program Files\\MetaTrader 5\\terminal64.exe"
-            # Initialize MT5 with explicit path
-            if not mt5.initialize(path=MT5_PATH):
-                error = mt5.last_error()
-                logger.error(f"MT5 initialization failed: {error}")
-                return {"success": False, "error": f"Failed to initialize MT5: {error[1]}"}
             
-            # Login to MT5
-            if not mt5.login(login=int(login), password=password, server=server):
-                error = mt5.last_error()
-                logger.error(f"MT5 login failed: {error}")
-                return {"success": False, "error": f"Login failed: {error[1]}"}
+            # First, shutdown any existing connection
+            try:
+                mt5.shutdown()
+            except:
+                pass
             
-            # Get account info
+            # Try multiple connection methods
+            connected = False
+            
+            # Method 1: Try to connect to running terminal
+            logger.info("Method 1: Attempting to connect to running MT5 terminal...")
+            if mt5.initialize():
+                logger.info("✓ Connected to running MT5 terminal!")
+                connected = True
+            else:
+                error = mt5.last_error()
+                logger.warning(f"✗ Failed to connect to running terminal: {error}")
+            
+            # Method 2: Try to launch terminal with explicit path
+            if not connected:
+                logger.info("Method 2: Trying to launch MT5 terminal with explicit path...")
+                MT5_PATH = r"C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+                if mt5.initialize(path=MT5_PATH):
+                    logger.info("✓ Successfully launched and connected to MT5 terminal!")
+                    connected = True
+                else:
+                    error = mt5.last_error()
+                    logger.warning(f"✗ Failed to launch terminal: {error}")
+            
+            # Method 3: Try with server credentials
+            if not connected:
+                logger.info("Method 3: Trying to connect with server credentials...")
+                if mt5.initialize(server=server, login=int(login), password=password):
+                    logger.info("✓ Successfully connected with server credentials!")
+                    connected = True
+                else:
+                    error = mt5.last_error()
+                    logger.warning(f"✗ Failed to connect with server credentials: {error}")
+            
+            if not connected:
+                return {"success": False, "error": "Failed to connect to MT5 terminal. Please ensure MT5 is installed and running."}
+            
+            # Login to MT5 if not already logged in
             account_info = mt5.account_info()
             if account_info is None:
-                return {"success": False, "error": "Failed to get account info"}
+                logger.info("Attempting to login with credentials...")
+                if not mt5.login(login=int(login), password=password, server=server):
+                    error = mt5.last_error()
+                    logger.error(f"MT5 login failed: {error}")
+                    return {"success": False, "error": f"Login failed: {error[1] if len(error) > 1 else str(error)}"}
+                else:
+                    logger.info("✓ Login successful!")
+                    account_info = mt5.account_info()
+            
+            if account_info is None:
+                return {"success": False, "error": "Failed to get account info after login"}
             
             self.connected = True
             self.account_info = {
@@ -72,7 +112,7 @@ class MT5Service:
             
         except Exception as e:
             logger.error(f"MT5 connection error: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": f"Connection error: {str(e)}"}
     
     async def disconnect(self):
         """Disconnect from MT5 terminal."""

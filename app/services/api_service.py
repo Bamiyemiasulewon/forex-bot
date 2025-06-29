@@ -27,7 +27,9 @@ class ApiService:
         """
         url = f"{self.base_url}{endpoint}"
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            # Increase timeout for MT5 operations which can take longer
+            timeout = 60.0 if "mt5" in endpoint.lower() else 15.0
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 logger.info(f"Making API call: {method} {url} with params {kwargs.get('params')}")
                 response = await client.request(method, url, **kwargs)
                 response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
@@ -51,5 +53,19 @@ class ApiService:
 
 # Initialize with an environment variable, providing a default for local development
 # The RENDER_EXTERNAL_URL is provided by Render, so we can use it to construct the API URL
-API_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8000")
+# For local development, we'll use the local server URL
+def get_api_base_url():
+    """Get the appropriate API base URL based on environment."""
+    # Check if we're running locally (no RENDER_EXTERNAL_URL or it's empty)
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    
+    if not render_url or "localhost" in render_url or "127.0.0.1" in render_url:
+        # Local development - use local server
+        return "http://127.0.0.1:8000"
+    else:
+        # Production - use Render URL
+        return render_url.rstrip('/')
+
+API_BASE_URL = get_api_base_url()
+logger.info(f"API Service initialized with base URL: {API_BASE_URL}")
 api_service = ApiService(base_url=API_BASE_URL) 

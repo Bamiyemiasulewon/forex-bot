@@ -345,11 +345,26 @@ async def calculate_pip_value(pair: str, trade_size: float):
 
 # MT5 Trading Endpoints with real MT5 service
 @app.post("/api/mt5/connect")
-async def mt5_connect(credentials: MT5Credentials):
+async def mt5_connect(credentials: dict):
     """Connect to MT5 using real service."""
     try:
-        result = await mt5_service.connect(credentials.login, credentials.password, credentials.server)
-        logger.info(f"MT5 connection attempt for login: {credentials.login}, result: {result}")
+        # Handle both dict and Pydantic model inputs
+        if hasattr(credentials, 'login'):
+            # Pydantic model
+            login = credentials.login
+            password = credentials.password
+            server = credentials.server
+        else:
+            # Dict input
+            login = credentials.get("login")
+            password = credentials.get("password")
+            server = credentials.get("server")
+        
+        if not all([login, password, server]):
+            return {"success": False, "error": "Missing credentials"}
+        
+        result = await mt5_service.connect(login, password, server)
+        logger.info(f"MT5 connection attempt for login: {login}, result: {result}")
         # Return the full result, including error details, to the user
         return result
     except Exception as e:

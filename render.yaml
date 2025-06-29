@@ -23,6 +23,11 @@ services:
         value: "8000"
       - key: RELOAD
         value: "false"
+      # RENDER_EXTERNAL_URL is automatically set by Render
+      # This tells the API service to use the production URL instead of localhost
+      # For local development, this will be empty and the service will use http://127.0.0.1:8000
+      - key: RENDER_EXTERNAL_URL
+        value: "https://forex-bot1.onrender.com" # Your actual Render URL
 
 databases:
   - name: forex-bot-db

@@ -110,7 +110,7 @@ def initialize_shutdown_event():
 
 # --- Network Configuration ---
 TELEGRAM_API_TIMEOUT = 30.0
-LOCAL_API_TIMEOUT = 10.0
+LOCAL_API_TIMEOUT = 60.0  # Increased for MT5 operations
 MAX_RETRIES = 3
 RETRY_DELAY = 5.0
 
@@ -902,14 +902,18 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "server": server
             })
             
-            if data and data.get("success"):
+            if data is None:
+                await loading_msg.edit_text("❌ **Connection Failed:** API server is not running. Please start the server first.")
+                return
+            
+            if data.get("success"):
                 await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
             else:
                 error_msg = data.get("error", "Connection failed. Please check your credentials.")
                 await loading_msg.edit_text(f"❌ **Connection Failed:** {error_msg}")
                 
         except Exception as e:
-            await loading_msg.edit_text("❌ Connection error. Please try again.")
+            await loading_msg.edit_text(f"❌ **Connection Failed:** {str(e)}")
         return
     
     # Start multi-step process
@@ -928,7 +932,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data = await api_service.make_api_call("/api/mt5/status")
         
-        if data and data.get("connected"):
+        if data is None:
+            await loading_msg.edit_text("❌ **Status Check Failed:** API server is not running. Please start the server first.")
+            return
+        
+        if data.get("connected"):
             account_info = data.get("account", {})
             response = (
                 f"✅ **MT5 Connected**\n\n"
@@ -943,7 +951,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        await loading_msg.edit_text("❌ Error checking status. Please try again.")
+        await loading_msg.edit_text(f"❌ **Status Check Failed:** {str(e)}")
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show account balance"""
@@ -951,6 +959,10 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         data = await api_service.make_api_call("/api/mt5/balance")
+        
+        if data is None:
+            await loading_msg.edit_text("❌ **Balance Check Failed:** API server is not running. Please start the server first.")
+            return
         
         if data:
             response = (
@@ -967,7 +979,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        await loading_msg.edit_text("❌ Error fetching balance. Please try again.")
+        await loading_msg.edit_text(f"❌ **Balance Check Failed:** {str(e)}")
 
 async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed account info"""
@@ -975,6 +987,10 @@ async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         data = await api_service.make_api_call("/api/mt5/account")
+        
+        if data is None:
+            await loading_msg.edit_text("❌ **Account Check Failed:** API server is not running. Please start the server first.")
+            return
         
         if data:
             response = (
@@ -994,7 +1010,7 @@ async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        await loading_msg.edit_text("❌ Error fetching account info. Please try again.")
+        await loading_msg.edit_text(f"❌ **Account Check Failed:** {str(e)}")
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Buy market order"""
@@ -1322,13 +1338,18 @@ async def handle_mt5_connect_step(update: Update, context: ContextTypes.DEFAULT_
                 "server": server
             })
             
-            if data and data.get("success"):
-                await loading_msg.edit_text("✅ **Connected successfully.**")
+            if data is None:
+                await loading_msg.edit_text("❌ **Connection Failed:** API server is not running. Please start the server first.")
+                return
+            
+            if data.get("success"):
+                await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
             else:
-                error_msg = data.get("error", "Connection failed. Please check your credentials and try again.")
-                await loading_msg.edit_text(f"❌ **Connection failed:** {error_msg}")
+                error_msg = data.get("error", "Connection failed. Please check your credentials.")
+                await loading_msg.edit_text(f"❌ **Connection Failed:** {error_msg}")
+                
         except Exception as e:
-            await loading_msg.edit_text(f"❌ **Connection failed:** {str(e)}")
+            await loading_msg.edit_text(f"❌ **Connection Failed:** {str(e)}")
         
         # Clear session after connection attempt
         session_manager.clear_session(user_id)
