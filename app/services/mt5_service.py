@@ -22,9 +22,9 @@ class MT5Service:
         """Connect to MT5 terminal."""
         try:
             logger.info(f"Connecting to MT5: {login}@{server}")
-            
-            # Initialize MT5
-            if not mt5.initialize():
+            MT5_PATH = r"C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+            # Initialize MT5 with explicit path
+            if not mt5.initialize(path=MT5_PATH):
                 error = mt5.last_error()
                 logger.error(f"MT5 initialization failed: {error}")
                 return {"success": False, "error": f"Failed to initialize MT5: {error[1]}"}

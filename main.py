@@ -349,11 +349,12 @@ async def mt5_connect(credentials: MT5Credentials):
     """Connect to MT5 using real service."""
     try:
         result = await mt5_service.connect(credentials.login, credentials.password, credentials.server)
-        logger.info(f"MT5 connection attempt for login: {credentials.login}")
+        logger.info(f"MT5 connection attempt for login: {credentials.login}, result: {result}")
+        # Return the full result, including error details, to the user
         return result
     except Exception as e:
         logger.error(f"Error connecting to MT5: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return {"success": False, "error": str(e)}
 
 @app.get("/api/mt5/status")
 async def mt5_status():

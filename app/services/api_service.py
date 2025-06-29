@@ -51,5 +51,5 @@ class ApiService:
 
 # Initialize with an environment variable, providing a default for local development
 # The RENDER_EXTERNAL_URL is provided by Render, so we can use it to construct the API URL
-API_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8001")
+API_BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8000")
 api_service = ApiService(base_url=API_BASE_URL) 

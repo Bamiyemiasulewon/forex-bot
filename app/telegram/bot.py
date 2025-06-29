@@ -1039,10 +1039,9 @@ async def handle_mt5_connect_step(update: Update, context: ContextTypes.DEFAULT_
                 await loading_msg.edit_text("✅ **Connected successfully.**")
             else:
                 error_msg = data.get("error", "Connection failed. Please check your credentials and try again.")
-                await loading_msg.edit_text(f"❌ **Connection failed. Please check your credentials and try again.**")
-                
+                await loading_msg.edit_text(f"❌ **Connection failed:** {error_msg}")
         except Exception as e:
-            await loading_msg.edit_text("❌ **Connection failed. Please check your credentials and try again.**")
+            await loading_msg.edit_text(f"❌ **Connection failed:** {str(e)}")
         
         # Clear session after connection attempt
         session_manager.clear_session(user_id)
