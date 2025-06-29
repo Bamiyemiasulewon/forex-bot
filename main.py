@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from telegram.ext import Application
 
 # Import our modules
-from app.telegram.bot import setup_handlers, start_telegram_bot, shutdown_bot
+from app.telegram.bot import setup_handlers, start_telegram_bot, shutdown_bot, set_bot_commands
 from app.services.api_service import api_service
 from app.services.signal_service import signal_service
 from app.services.market_service import market_service

@@ -2,6 +2,7 @@ import pandas as pd
 from app.utils.indicators import calculate_rsi
 from typing import List, Dict, Optional
 from app.services.market_service import market_service
+from app.services.order_block_strategy import order_block_strategy
 import asyncio
 import logging
 import httpx
@@ -68,7 +69,7 @@ class SignalService:
 
     async def generate_signals(self) -> List[Dict]:
         """
-        Generates a list of real trading signals based on RSI.
+        Generates a list of real trading signals based on both RSI and Order Block + RSI + Fibonacci strategies.
         Throttles requests to Alpha Vantage to 1 every 12 seconds (5 per minute).
         Caches last successful signals as fallback if rate-limited.
         """
@@ -102,51 +103,40 @@ class SignalService:
             return signals
 
     async def analyze_pair_for_signal(self, pair: str) -> Optional[Dict]:
-        """Analyzes a single pair and returns a signal if conditions are met."""
+        """Analyzes a single pair and returns a signal if conditions are met for either strategy."""
         try:
             # Fetch historical data (e.g., 1-hour timeframe for the last 100 hours)
             df = await self.fetch_ohlcv(pair, interval='60min', outputsize='compact')
-            if df is None or len(df) < 14:
+            if df is None or len(df) < 50:
                 logger.info(f"Not enough historical data for {pair}, skipping.")
                 return None
-            # Calculate RSI
-            rsi = calculate_rsi(df['close'])
-            last_rsi = rsi.iloc[-1]
+            
             # Get current price for signal details
             ticker = await market_service.get_market_data(pair)
             if not ticker or not ticker.get('price'):
                 logger.warning(f"Could not fetch ticker data for {pair}, skipping.")
                 return None
             current_price = ticker['price']
-            # Dynamic stop-loss based on recent volatility (e.g., Average True Range)
-            df['tr'] = pd.DataFrame([
-                df['high'] - df['low'],
-                abs(df['high'] - df['close'].shift()),
-                abs(df['low'] - df['close'].shift())
-            ]).max()
-            atr = df['tr'].rolling(14).mean().iloc[-1]
-            stop_loss = atr * 1.5  # Example: 1.5 * ATR
-            signal = None
-            # Overbought/Oversold thresholds can be fine-tuned
-            if last_rsi > 75:  # Overbought condition
-                signal = {
-                    "pair": pair, "strategy": "RSI Overbought",
-                    "entry_range": f"{current_price:.5f} - {current_price - atr*0.5:.5f}",
-                    "stop_loss": round(current_price + stop_loss, 5),
-                    "take_profit": round(current_price - (stop_loss * 2), 5),  # 1:2 R:R
-                    "confidence": f"{min(95, int(last_rsi) + 20)}%",
-                    "risk_reward_ratio": "1:2"
-                }
-            elif last_rsi < 25:  # Oversold condition
-                signal = {
-                    "pair": pair, "strategy": "RSI Oversold",
-                    "entry_range": f"{current_price:.5f} - {current_price + atr*0.5:.5f}",
-                    "stop_loss": round(current_price - stop_loss, 5),
-                    "take_profit": round(current_price + (stop_loss * 2), 5),  # 1:2 R:R
-                    "confidence": f"{min(95, int(100 - last_rsi) + 20)}%",
-                    "risk_reward_ratio": "1:2"
-                }
-            return signal
+            
+            # Try Order Block + RSI + Fibonacci strategy first (higher priority)
+            order_block_signal = order_block_strategy.analyze_pair(df)
+            if order_block_signal:
+                # Add current price and pair info
+                order_block_signal.update({
+                    'pair': pair,
+                    'current_price': current_price,
+                    'priority': 'high'
+                })
+                logger.info(f"Order Block signal generated for {pair}: {order_block_signal['signal']}")
+                return order_block_signal
+            
+            # Fallback to RSI strategy if no Order Block signal
+            rsi_signal = await self._analyze_rsi_strategy(df, pair, current_price)
+            if rsi_signal:
+                rsi_signal['priority'] = 'medium'
+                return rsi_signal
+            
+            return None
         except RuntimeError as e:
             if str(e) == "rate_limited":
                 raise
@@ -155,5 +145,59 @@ class SignalService:
         except Exception as e:
             logger.error(f"Could not generate signal for {pair}: {e}", exc_info=True)
             return None
+
+    async def _analyze_rsi_strategy(self, df: pd.DataFrame, pair: str, current_price: float) -> Optional[Dict]:
+        """Analyze pair using RSI strategy (fallback method)."""
+        # Calculate RSI
+        rsi = calculate_rsi(df['close'])
+        last_rsi = rsi.iloc[-1]
+        
+        # Dynamic stop-loss based on recent volatility (e.g., Average True Range)
+        df['tr'] = pd.DataFrame([
+            df['high'] - df['low'],
+            abs(df['high'] - df['close'].shift()),
+            abs(df['low'] - df['close'].shift())
+        ]).max()
+        atr = df['tr'].rolling(14).mean().iloc[-1]
+        stop_loss = atr * 1.5  # Example: 1.5 * ATR
+        
+        signal = None
+        # Overbought/Oversold thresholds can be fine-tuned
+        if last_rsi > 75:  # Overbought condition
+            signal = {
+                "pair": pair, 
+                "strategy": "RSI Overbought",
+                "entry_range": f"{current_price:.5f} - {current_price - atr*0.5:.5f}",
+                "stop_loss": round(current_price + stop_loss, 5),
+                "take_profit": round(current_price - (stop_loss * 2), 5),  # 1:2 R:R
+                "confidence": f"{min(95, int(last_rsi) + 20)}%",
+                "risk_reward_ratio": "1:2",
+                "rsi_value": last_rsi
+            }
+        elif last_rsi < 25:  # Oversold condition
+            signal = {
+                "pair": pair, 
+                "strategy": "RSI Oversold",
+                "entry_range": f"{current_price:.5f} - {current_price + atr*0.5:.5f}",
+                "stop_loss": round(current_price - stop_loss, 5),
+                "take_profit": round(current_price + (stop_loss * 2), 5),  # 1:2 R:R
+                "confidence": f"{min(95, int(100 - last_rsi) + 20)}%",
+                "risk_reward_ratio": "1:2",
+                "rsi_value": last_rsi
+            }
+        
+        return signal
+
+    def get_strategy_status(self) -> Dict:
+        """Get status of all available strategies."""
+        return {
+            "order_block_strategy": order_block_strategy.get_strategy_info(),
+            "rsi_strategy": {
+                "name": "RSI Overbought/Oversold",
+                "timeframe": "1H",
+                "conditions": "RSI > 75 (sell) or RSI < 25 (buy)",
+                "risk_reward": "1:2"
+            }
+        }
 
 signal_service = SignalService() 

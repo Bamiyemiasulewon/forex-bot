@@ -90,6 +90,9 @@ from app.services.api_service import api_service, ApiService  # Import the insta
 import httpx
 from app.security.credential_manager import CredentialManager
 from app.mt5.mt5_manager import MT5Manager
+from app.telegram.orderblock_commands import (
+    orderblock_command, orderblock_status_command, scan_orderblocks_command
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,23 +179,54 @@ Use /help to see what I can do.'''
 
 commands_message = '''🎮 **BOT COMMANDS**
 
+**MT5 Trading**
+/start - Initialize bot
+/connect - Connect to MT5 (prompts for login details)
+/status - Check MT5 connection
+/balance - Show account balance
+/account - Show account info
+/buy - Place buy market order
+/sell - Place sell market order
+/buylimit - Place buy limit order
+/selllimit - Place sell limit order
+/buystop - Place buy stop order
+/sellstop - Place sell stop order
+/positions - Show open positions
+/orders - Show pending orders
+/close - Close specific position
+/closeall - Close all positions
+/modify - Modify SL/TP
+/cancel - Cancel pending order
+/price - Get current price
+/spread - Get current spread
+/symbols - Available symbols
+/riskcalc - Calculate lot size
+/pipvalue - Calculate pip value
+/summary - Trading summary
+/profit - Current P&L
+
 **Trading & Analysis**
-`/signals` - Get the latest forex signals
-`/market [PAIR]` - View live market data (e.g., `/market EURUSD`)
-`/analysis [PAIR]` - Technical analysis for a pair
-`/trades` - View your trade history
+/signals - Get the latest forex signals
+/market [PAIR] - View live market data (e.g., /market EURUSD)
+/analysis [PAIR] - Technical analysis for a pair
+/trades - View your trade history
+
+**Order Block Strategy**
+/orderblock - Show Order Block strategy info
+/orderblock_status - Show current Order Block strategy status
+/scan_orderblocks - Scan for Order Block setups
 
 **Calculators & Tools**
-`/risk [PAIR] [RISK%] [SL PIPS]` - Calculate position size
-`/pipcalc [PAIR] [SIZE]` - Calculate pip values
+/risk [PAIR] [RISK%] [SL PIPS] - Calculate position size
+/pipcalc [PAIR] [SIZE] - Calculate pip values
 
 **Information**
-`/strategies` - Learn about our strategies
-`/donate` - Support the bot
-`/help` - Show this command list
+/strategies - Learn about our strategies
+/donate - Support the bot
+/help - Show this command list
 
 💡 **Tips:**
-• Use `/risk` or `/pipcalc` without parameters for help
+• Use /risk or /pipcalc without parameters for help
 • All commands support major currency pairs
 • Risk % should be 0.1-5% for safety'''
 
@@ -242,12 +276,8 @@ async def show_personal_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = user.id
     user_name = user.first_name or "Trader"
     prefs = get_user_preferences(user_id)
-    menu_text = f"""👋 Hi {user_name}!!\n\nWelcome to your *Personal Forex Assistant Menu*.\n\nSelect an option below to manage your trading or get help.\n\n*Your risk profile:* {prefs.get('risk_profile', 'N/A')}\n*Trading style:* {prefs.get('trading_style', 'N/A')}\n"""
-    keyboard = create_personalized_keyboard(user_id)
-    if update.message:
-        await update.message.reply_text(menu_text, reply_markup=keyboard, parse_mode='Markdown')
-    elif update.callback_query:
-        await update.callback_query.edit_message_text(menu_text, reply_markup=keyboard, parse_mode='Markdown')
+    menu_text = f"""👋 Hi {user_name}!!\n\nWelcome to your Personal Forex Assistant Menu.\n\nSelect an option below to manage your trading or get help.\n\nYour risk profile: {prefs.get('risk_profile', 'N/A')}\nTrading style: {prefs.get('trading_style', 'N/A')}\n\nNB: Click on the Menu button to see list on commands"""
+    await update.message.reply_text(menu_text)
 
 # --- Handle Personal Menu Callbacks ---
 async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -359,15 +389,15 @@ async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT
 # --- Command Handlers (Frontend Logic Only) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name or "Trader"
-    await update.message.reply_text(
-        welcome_message.format(name=user_name),
-        reply_markup=get_reply_keyboard()
-    )
-    await show_personal_menu(update, context)
+    user = update.effective_user
+    user_id = user.id
+    user_name = user.first_name or "Trader"
+    prefs = get_user_preferences(user_id)
+    menu_text = f"""👋 Hi {user_name}!!\n\nWelcome to your Personal Forex Assistant Menu.\n\nSelect an option below to manage your trading or get help.\n\nYour risk profile: {prefs.get('risk_profile', 'N/A')}\nTrading style: {prefs.get('trading_style', 'N/A')}\n\nNB: Click on the Menu button to see list on commands"""
+    await update.message.reply_text(menu_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_personal_menu(update, context)
+    await update.message.reply_text(commands_message, parse_mode='Markdown')
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loading_msg = await update.message.reply_text("🔍 Fetching latest signals...")
@@ -581,20 +611,268 @@ async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text("😕 An error occurred while fetching trades. Please try again later.")
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = await safe_api_call_with_retry("/api/strategies")
-    if not data:
-        await update.message.reply_text("😕 Could not fetch strategies. The API server may be unavailable. Please try again later.")
-        return
-    
-    response = "📚 **Trading Strategies**\n\n"
-    for strategy in data['strategies']:
-        response += f"• **{strategy}**\n"
-    
-    response += f"\n{data['message']}"
-    
-    await update.message.reply_text(response, parse_mode='Markdown')
+    """Show available trading strategies."""
+    strategies_text = '''📊 **TRADING STRATEGIES**
 
-# --- MT5 Trading Commands ---
+🎯 **Order Block + RSI + Fibonacci (Primary)**
+• Break of structure detection
+• Order block identification  
+• Fibonacci retracement alignment (38.2%, 50%, 61.8%)
+• RSI confirmation (oversold < 30, overbought > 70)
+• Risk: 10% per trade, max 3 trades/day
+• Sessions: London (7-11 AM GMT), NY (12-4 PM GMT)
+
+📈 **RSI Strategy (Fallback)**
+• RSI oversold/overbought signals
+• Dynamic stop-loss based on ATR
+• 1:2 risk-reward ratio
+
+💡 **Use /orderblock for detailed strategy info**'''
+    
+    await update.message.reply_text(strategies_text, parse_mode='Markdown')
+
+async def orderblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show detailed Order Block + RSI + Fibonacci strategy information."""
+    from app.services.order_block_strategy import order_block_strategy
+    
+    strategy_info = order_block_strategy.get_strategy_info()
+    
+    orderblock_text = f'''🎯 **Order Block + RSI + Fibonacci Strategy**
+
+📊 **Current Status:**
+• Strategy: {strategy_info['strategy_name']}
+• Timeframe: {strategy_info['timeframe']}
+• Risk per trade: {strategy_info['risk_per_trade']}
+• Max trades per day: {strategy_info['max_trades_per_day']}
+• Max daily loss: {strategy_info['max_daily_loss']}
+• Daily trades: {strategy_info['daily_trades']}/{strategy_info['max_trades_per_day']}
+• Daily P&L: ${strategy_info['daily_pnl']:.2f}
+• In trading session: {'✅ Yes' if strategy_info['in_session'] else '❌ No'}
+
+⏰ **Trading Sessions:**
+• London: {strategy_info['trading_sessions']['london']}
+• New York: {strategy_info['trading_sessions']['new_york']}
+
+🎯 **Entry Conditions:**
+
+**BUY SETUP:**
+1. Break of structure to the upside
+2. Identify bullish Order Block
+3. OB aligns with Fibonacci retracement
+4. RSI is below 30 (oversold)
+5. Enter at OB zone
+
+**SELL SETUP:**
+1. Break of structure to the downside
+2. Identify bearish Order Block
+3. OB aligns with Fibonacci retracement
+4. RSI is above 70 (overbought)
+5. Enter at OB zone
+
+📈 **Risk Management:**
+• Entry: At Order Block zone
+• Stop Loss: Just beyond the order block
+• Take Profit: 1:2 risk-reward ratio
+• Trailing stop: Optional after 1:1 RR
+
+💡 **Commands:**
+• `/orderblock_status` - Current strategy status
+• `/orderblock_signals` - Recent signals
+• `/orderblock_performance` - Performance metrics
+• `/orderblock_settings` - Strategy settings'''
+    
+    await update.message.reply_text(orderblock_text, parse_mode='Markdown')
+
+async def orderblock_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current Order Block strategy status."""
+    from app.services.order_block_strategy import order_block_strategy
+    from app.services.risk_service import risk_service
+    
+    strategy_info = order_block_strategy.get_strategy_info()
+    risk_summary = risk_service.get_risk_summary()
+    
+    status_text = f'''📊 **Order Block Strategy Status**
+
+🟢 **Strategy Active: {'Yes' if strategy_info['in_session'] else 'No'}**
+⏰ **Current Session: {'London' if 7 <= datetime.now(timezone.utc).hour < 11 else 'New York' if 12 <= datetime.now(timezone.utc).hour < 16 else 'Outside Trading Hours'}**
+
+📈 **Daily Statistics:**
+• Trades today: {strategy_info['daily_trades']}/{strategy_info['max_trades_per_day']}
+• Daily P&L: ${strategy_info['daily_pnl']:.2f}
+• Daily loss limit: {strategy_info['max_daily_loss']}
+• Can trade: {'✅ Yes' if strategy_info['daily_trades'] < strategy_info['max_trades_per_day'] and abs(strategy_info['daily_pnl']) < float(strategy_info['max_daily_loss'].rstrip('%')) * 100 else '❌ No'}
+
+🎯 **Risk Parameters:**
+• Risk per trade: {risk_summary['risk_per_trade']}
+• Risk/Reward ratio: {risk_summary['risk_reward_ratio']}
+• Max daily loss: {risk_summary['max_daily_loss']}
+
+⏰ **Next Session:**
+• London: {strategy_info['trading_sessions']['london']} GMT
+• New York: {strategy_info['trading_sessions']['new_york']} GMT'''
+    
+    await update.message.reply_text(status_text, parse_mode='Markdown')
+
+async def orderblock_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show recent Order Block signals."""
+    from app.services.signal_service import signal_service
+    
+    try:
+        signals = await signal_service.generate_signals()
+        
+        if not signals:
+            await update.message.reply_text("📊 **No recent signals found.**\n\nThis could mean:\n• No Order Block setups detected\n• Outside trading sessions\n• Market conditions not suitable")
+            return
+        
+        # Filter for Order Block signals
+        orderblock_signals = [s for s in signals if 'Order Block' in s.get('strategy', '')]
+        
+        if not orderblock_signals:
+            await update.message.reply_text("📊 **No Order Block signals in recent data.**\n\nOther signals available:\n" + "\n".join([f"• {s['pair']}: {s['strategy']}" for s in signals[:3]]))
+            return
+        
+        signals_text = "🎯 **Recent Order Block Signals:**\n\n"
+        
+        for i, signal in enumerate(orderblock_signals[:5], 1):
+            signals_text += f"**{i}. {signal['pair']}**\n"
+            signals_text += f"• Signal: {signal['signal'].upper()}\n"
+            signals_text += f"• Strategy: {signal['strategy']}\n"
+            signals_text += f"• Confidence: {signal['confidence']}%\n"
+            if 'entry_price' in signal:
+                signals_text += f"• Entry: {signal['entry_price']:.5f}\n"
+            if 'stop_loss' in signal:
+                signals_text += f"• Stop Loss: {signal['stop_loss']:.5f}\n"
+            if 'take_profit' in signal:
+                signals_text += f"• Take Profit: {signal['take_profit']:.5f}\n"
+            if 'reasoning' in signal:
+                signals_text += f"• Reason: {signal['reasoning']}\n"
+            signals_text += "\n"
+        
+        await update.message.reply_text(signals_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error getting Order Block signals: {e}")
+        await update.message.reply_text("❌ Error retrieving signals. Please try again later.")
+
+async def orderblock_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show Order Block strategy performance metrics."""
+    from app.services.order_block_strategy import order_block_strategy
+    
+    strategy_info = order_block_strategy.get_strategy_info()
+    
+    # Calculate performance metrics (placeholder - would need database integration)
+    total_trades = strategy_info['daily_trades']
+    daily_pnl = strategy_info['daily_pnl']
+    
+    if total_trades == 0:
+        performance_text = '''📊 **Order Block Strategy Performance**
+
+📈 **Today's Performance:**
+• Total trades: 0
+• Win rate: N/A
+• Average RR: N/A
+• Daily P&L: $0.00
+
+📊 **Historical Performance:**
+• Total trades: 0
+• Win rate: N/A
+• Average RR: N/A
+• Best trade: N/A
+• Worst trade: N/A
+
+💡 **Start trading to see performance metrics!**'''
+    else:
+        # Placeholder calculations (would need real data)
+        win_rate = "N/A"  # Would calculate from database
+        avg_rr = "1:2"  # Strategy target
+        
+        performance_text = f'''📊 **Order Block Strategy Performance**
+
+📈 **Today's Performance:**
+• Total trades: {total_trades}
+• Win rate: {win_rate}
+• Average RR: {avg_rr}
+• Daily P&L: ${daily_pnl:.2f}
+
+📊 **Historical Performance:**
+• Total trades: {total_trades}
+• Win rate: {win_rate}
+• Average RR: {avg_rr}
+• Best trade: N/A
+• Worst trade: N/A
+
+💡 **Performance tracking requires database integration**'''
+    
+    await update.message.reply_text(performance_text, parse_mode='Markdown')
+
+async def orderblock_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show and allow modification of Order Block strategy settings."""
+    from app.services.order_block_strategy import order_block_strategy
+    
+    strategy_info = order_block_strategy.get_strategy_info()
+    
+    settings_text = f'''⚙️ **Order Block Strategy Settings**
+
+📊 **Current Configuration:**
+• RSI Period: {order_block_strategy.rsi_period}
+• RSI Oversold: {order_block_strategy.rsi_oversold}
+• RSI Overbought: {order_block_strategy.rsi_overbought}
+• Fibonacci Levels: {order_block_strategy.fib_levels}
+• Lookback Period: {order_block_strategy.lookback_period}
+• ATR Period: {order_block_strategy.atr_period}
+
+💰 **Risk Management:**
+• Risk per trade: {strategy_info['risk_per_trade']}
+• Max trades per day: {strategy_info['max_trades_per_day']}
+• Max daily loss: {strategy_info['max_daily_loss']}
+
+⏰ **Trading Sessions:**
+• London: {strategy_info['trading_sessions']['london']}
+• New York: {strategy_info['trading_sessions']['new_york']}
+
+💡 **Settings are currently read-only.**
+Contact admin for configuration changes.'''
+    
+    await update.message.reply_text(settings_text, parse_mode='Markdown')
+
+async def scan_orderblocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Scan for current Order Block setups across all pairs."""
+    from app.services.signal_service import signal_service
+    
+    await update.message.reply_text("🔍 **Scanning for Order Block setups...**")
+    
+    try:
+        signals = await signal_service.generate_signals()
+        
+        if not signals:
+            await update.message.reply_text("📊 **No Order Block setups found.**\n\nMarket conditions may not be suitable for Order Block entries.")
+            return
+        
+        # Filter for Order Block signals
+        orderblock_signals = [s for s in signals if 'Order Block' in s.get('strategy', '')]
+        
+        if not orderblock_signals:
+            await update.message.reply_text("📊 **No Order Block setups detected.**\n\nThis could mean:\n• No break of structure detected\n• Order blocks not aligning with Fibonacci levels\n• RSI conditions not met\n• Outside optimal trading sessions")
+            return
+        
+        scan_text = f"🎯 **Order Block Setups Found: {len(orderblock_signals)}**\n\n"
+        
+        for signal in orderblock_signals:
+            scan_text += f"**{signal['pair']}** - {signal['signal'].upper()}\n"
+            scan_text += f"• Confidence: {signal['confidence']}%\n"
+            if 'fibonacci_level' in signal:
+                scan_text += f"• Fibonacci Level: {signal['fibonacci_level']}\n"
+            if 'rsi_value' in signal:
+                scan_text += f"• RSI: {signal['rsi_value']:.1f}\n"
+            if 'reasoning' in signal:
+                scan_text += f"• Setup: {signal['reasoning']}\n"
+            scan_text += "\n"
+        
+        await update.message.reply_text(scan_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error scanning for Order Blocks: {e}")
+        await update.message.reply_text("❌ Error scanning for setups. Please try again later.")
 
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Multi-step MT5 connection process"""
@@ -1093,6 +1371,12 @@ def setup_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(handle_personal_callback))
     app.add_handler(MessageHandler(TFilters.TEXT & (~TFilters.COMMAND), reply_keyboard_handler))
     app.add_handler(CommandHandler('cancel', cancel))
+    app.add_handler(CommandHandler("orderblock", orderblock_command))
+    app.add_handler(CommandHandler("orderblock_status", orderblock_status_command))
+    app.add_handler(CommandHandler("scan_orderblocks", scan_orderblocks_command))
+    app.add_handler(CommandHandler("orderblock_signals", orderblock_signals))
+    app.add_handler(CommandHandler("orderblock_performance", orderblock_performance))
+    app.add_handler(CommandHandler("orderblock_settings", orderblock_settings))
 
 async def run_network_diagnostics():
     """Run comprehensive network diagnostics."""
@@ -1144,6 +1428,9 @@ async def start_telegram_bot(telegram_token: str = None, shutdown_event: asyncio
         # Initialize the application
         await telegram_app.initialize()
         
+        # Set bot commands for Telegram UI
+        await set_bot_commands(telegram_app)
+        
         # Delete any existing webhook to ensure polling mode
         try:
             webhook_info = await telegram_app.bot.get_webhook_info()
@@ -1171,11 +1458,9 @@ async def start_telegram_bot(telegram_token: str = None, shutdown_event: asyncio
             
     except Exception as e:
         logger.error(f"❌ Error starting Telegram bot: {e}")
-        # Don't raise the exception to prevent crashing the entire application
-        # Just log the error and continue
         return
     finally:
-        await stop_telegram_bot()
+        await shutdown_bot()
 
 async def periodic_session_cleanup(shutdown_event: asyncio.Event = None):
     """Periodically clean up expired sessions."""
@@ -1251,3 +1536,35 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+async def set_bot_commands(application):
+    await application.bot.set_my_commands([
+        ("start", "Initialize bot"),
+        ("connect", "Connect to MT5 (prompts for login details)"),
+        ("status", "Check MT5 connection"),
+        ("balance", "Show account balance"),
+        ("account", "Show account info"),
+        ("buy", "Place buy market order"),
+        ("sell", "Place sell market order"),
+        ("buylimit", "Place buy limit order"),
+        ("selllimit", "Place sell limit order"),
+        ("buystop", "Place buy stop order"),
+        ("sellstop", "Place sell stop order"),
+        ("positions", "Show open positions"),
+        ("orders", "Show pending orders"),
+        ("close", "Close specific position"),
+        ("closeall", "Close all positions"),
+        ("modify", "Modify SL/TP"),
+        ("cancel", "Cancel pending order"),
+        ("price", "Get current price"),
+        ("spread", "Get current spread"),
+        ("symbols", "Available symbols"),
+        ("riskcalc", "Calculate lot size"),
+        ("pipcalc", "Calculate pip values"),
+        ("strategies", "Learn about our strategies"),
+        ("donate", "Support the bot"),
+        ("help", "Show this command list")
+    ])
+
+# In your main() or startup logic, after Application is created and before polling:
+# await set_bot_commands(application)
