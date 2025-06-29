@@ -7,7 +7,13 @@ Uses actual MT5 API calls for real trading functionality.
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-import MetaTrader5 as mt5
+
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+    mt5 = None
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +26,9 @@ class MT5Service:
         
     async def connect(self, login: str, password: str, server: str) -> Dict[str, Any]:
         """Connect to MT5 terminal."""
+        if not MT5_AVAILABLE:
+            return {"success": False, "error": "MetaTrader5 package not available"}
+            
         try:
             logger.info(f"Connecting to MT5: {login}@{server}")
             MT5_PATH = r"C:\\Program Files\\MetaTrader 5\\terminal64.exe"
@@ -67,6 +76,9 @@ class MT5Service:
     
     async def disconnect(self):
         """Disconnect from MT5 terminal."""
+        if not MT5_AVAILABLE:
+            return
+            
         try:
             if self.connected:
                 mt5.shutdown()
@@ -78,6 +90,9 @@ class MT5Service:
     
     async def get_status(self) -> Dict[str, Any]:
         """Get connection status and account info."""
+        if not MT5_AVAILABLE:
+            return {"connected": False, "error": "MetaTrader5 package not available"}
+            
         if not self.connected:
             return {"connected": False, "error": "Not connected"}
         
@@ -110,6 +125,9 @@ class MT5Service:
     
     async def get_balance(self) -> Dict[str, Any]:
         """Get account balance information."""
+        if not MT5_AVAILABLE:
+            return None
+            
         if not self.connected:
             return None
         
@@ -132,6 +150,9 @@ class MT5Service:
     
     async def get_account(self) -> Dict[str, Any]:
         """Get detailed account information."""
+        if not MT5_AVAILABLE:
+            return None
+            
         if not self.connected:
             return None
         
@@ -159,6 +180,9 @@ class MT5Service:
     async def place_order(self, symbol: str, lot: float, order_type: str, 
                          sl: Optional[float] = None, tp: Optional[float] = None) -> Dict[str, Any]:
         """Place a market order."""
+        if not MT5_AVAILABLE:
+            return {"success": False, "error": "MetaTrader5 package not available"}
+            
         if not self.connected:
             return {"success": False, "error": "Not connected to MT5"}
         
@@ -230,6 +254,9 @@ class MT5Service:
     
     async def get_positions(self) -> List[Dict[str, Any]]:
         """Get open positions."""
+        if not MT5_AVAILABLE:
+            return []
+        
         if not self.connected:
             return []
         
@@ -262,6 +289,9 @@ class MT5Service:
     
     async def get_orders(self) -> List[Dict[str, Any]]:
         """Get pending orders."""
+        if not MT5_AVAILABLE:
+            return []
+        
         if not self.connected:
             return []
         
@@ -304,6 +334,9 @@ class MT5Service:
     
     async def close_position(self, ticket: int) -> Dict[str, Any]:
         """Close a specific position."""
+        if not MT5_AVAILABLE:
+            return {"success": False, "error": "MetaTrader5 package not available"}
+            
         if not self.connected:
             return {"success": False, "error": "Not connected to MT5"}
         
@@ -361,6 +394,9 @@ class MT5Service:
     
     async def close_all_positions(self) -> Dict[str, Any]:
         """Close all positions."""
+        if not MT5_AVAILABLE:
+            return {"success": False, "error": "MetaTrader5 package not available"}
+            
         if not self.connected:
             return {"success": False, "error": "Not connected to MT5"}
         
@@ -388,6 +424,9 @@ class MT5Service:
     
     async def get_price(self, symbol: str) -> Dict[str, Any]:
         """Get current price for a symbol."""
+        if not MT5_AVAILABLE:
+            return None
+        
         if not self.connected:
             return None
         
@@ -421,6 +460,9 @@ class MT5Service:
     
     async def get_summary(self) -> Dict[str, Any]:
         """Get trading summary."""
+        if not MT5_AVAILABLE:
+            return None
+        
         if not self.connected:
             return None
         

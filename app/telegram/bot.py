@@ -89,7 +89,6 @@ from telegram.ext import (
 from app.services.api_service import api_service, ApiService  # Import the instance and class
 import httpx
 from app.security.credential_manager import CredentialManager
-from app.mt5.mt5_manager import MT5Manager
 from app.telegram.orderblock_commands import (
     orderblock_command, orderblock_status_command, scan_orderblocks_command
 )
@@ -98,6 +97,16 @@ logger = logging.getLogger(__name__)
 
 # Global application instance for proper shutdown
 application = None
+
+# Global shutdown event
+shutdown_event = None
+
+def initialize_shutdown_event():
+    """Initialize the global shutdown event."""
+    global shutdown_event
+    if shutdown_event is None:
+        shutdown_event = asyncio.Event()
+    return shutdown_event
 
 # --- Network Configuration ---
 TELEGRAM_API_TIMEOUT = 30.0
@@ -128,7 +137,7 @@ def check_local_server():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
-        result = sock.connect_ex(('127.0.0.1', 8001))
+        result = sock.connect_ex(('127.0.0.1', 8000))
         sock.close()
         return result == 0
     except Exception:
@@ -138,7 +147,7 @@ async def test_api_connectivity():
     """Test API connectivity with proper error handling."""
     try:
         async with httpx.AsyncClient(timeout=LOCAL_API_TIMEOUT) as client:
-            response = await client.get("http://127.0.0.1:8001/health")
+            response = await client.get("http://127.0.0.1:8000/health")
             return response.status_code == 200
     except Exception as e:
         logger.warning(f"Local API server not reachable: {e}")
@@ -1393,22 +1402,22 @@ async def run_network_diagnostics():
     if not diagnostics["telegram_api"]:
         logger.error("❌ Cannot resolve api.telegram.org - DNS issue detected")
     if not diagnostics["local_server"]:
-        logger.warning("⚠️ Local API server is not running on port 8001")
+        logger.warning("⚠️ Local API server is not running on port 8000")
     if not diagnostics["api_connectivity"]:
         logger.warning("⚠️ Local API server is not responding to health checks")
     return diagnostics
 
-async def start_telegram_bot(telegram_token: str = None, shutdown_event: asyncio.Event = None):
+async def start_telegram_bot(telegram_token: str = None, shutdown_event_param: asyncio.Event = None):
     """Start the Telegram bot asynchronously."""
-    global telegram_app, bot_task
+    global telegram_app, bot_task, shutdown_event
     
     # Use provided token or fallback to environment variable
     if telegram_token is None:
         telegram_token = os.getenv("TELEGRAM_TOKEN", "8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY")
     
-    # Use provided shutdown event or create a default one
-    if shutdown_event is None:
-        shutdown_event = asyncio.Event()
+    # Use provided shutdown event or global one
+    if shutdown_event_param is None:
+        shutdown_event_param = shutdown_event or initialize_shutdown_event()
     
     try:
         logger.info("🤖 Initializing Telegram bot...")
@@ -1450,10 +1459,10 @@ async def start_telegram_bot(telegram_token: str = None, shutdown_event: asyncio
         logger.info("✅ Telegram bot started successfully!")
         
         # Start periodic session cleanup task
-        asyncio.create_task(periodic_session_cleanup(shutdown_event))
+        asyncio.create_task(periodic_session_cleanup(shutdown_event_param))
         
         # Keep the bot running until shutdown
-        while not shutdown_event.is_set():
+        while not shutdown_event_param.is_set():
             await asyncio.sleep(1)
             
     except Exception as e:
@@ -1462,12 +1471,12 @@ async def start_telegram_bot(telegram_token: str = None, shutdown_event: asyncio
     finally:
         await shutdown_bot()
 
-async def periodic_session_cleanup(shutdown_event: asyncio.Event = None):
+async def periodic_session_cleanup(shutdown_event_param: asyncio.Event = None):
     """Periodically clean up expired sessions."""
-    if shutdown_event is None:
-        shutdown_event = asyncio.Event()
+    if shutdown_event_param is None:
+        shutdown_event_param = shutdown_event
     
-    while not shutdown_event.is_set():
+    while not shutdown_event_param.is_set():
         try:
             session_manager.cleanup_expired_sessions()
             await asyncio.sleep(60)  # Run every minute
@@ -1493,11 +1502,10 @@ async def shutdown_bot():
 def signal_handler(signum, frame):
     """Handle shutdown signals."""
     logger.info(f"Received signal {signum}, initiating shutdown...")
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        loop.create_task(shutdown_bot())
-    else:
-        asyncio.run(shutdown_bot())
+    # Set the shutdown event to stop the bot
+    global shutdown_event
+    if shutdown_event:
+        shutdown_event.set()
 
 def main():
     # Configure logging
@@ -1507,14 +1515,18 @@ def main():
     )
     logger.info("🚀 Starting Forex Trading Bot...")
     
+    # Initialize shutdown event
+    global shutdown_event
+    shutdown_event = initialize_shutdown_event()
+    
     # Add signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        success = start_bot()
-        if not success:
-            logger.error("Failed to start bot.")
+        # Run the bot asynchronously using the global shutdown event
+        asyncio.run(start_telegram_bot())
+        
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
@@ -1522,12 +1534,12 @@ def main():
         logger.error("Please check:")
         logger.error("1. Internet connection")
         logger.error("2. DNS settings (try 8.8.8.8 or 1.1.1.1)")
-        logger.error("3. Local API server is running on http://127.0.0.1:8001")
+        logger.error("3. Local API server is running on http://127.0.0.1:8000")
         logger.error("4. Firewall/antivirus is not blocking Python")
         logger.error("5. Bot token is valid")
     finally:
         try:
-            if application:
+            if telegram_app:
                 run_async_safely(shutdown_bot())
         except Exception as e:
             logger.error(f"Error during final shutdown: {e}")

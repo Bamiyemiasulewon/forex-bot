@@ -1,4 +1,10 @@
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+    mt5 = None
+
 import threading
 
 class MT5Manager:
@@ -8,6 +14,9 @@ class MT5Manager:
         self.latest_signals = {}  # Optional: store latest signal per user
 
     def connect(self, user_id, login, password, server):
+        if not MT5_AVAILABLE:
+            return False, "MetaTrader5 package not available"
+        
         with self.lock:
             if user_id in self.sessions:
                 self.disconnect(user_id)
@@ -20,6 +29,9 @@ class MT5Manager:
             return True, "Connected"
 
     def disconnect(self, user_id):
+        if not MT5_AVAILABLE:
+            return
+            
         with self.lock:
             if user_id in self.sessions:
                 mt5.shutdown()
@@ -29,6 +41,9 @@ class MT5Manager:
         return self.sessions.get(user_id, False)
 
     def get_account_info(self, user_id):
+        if not MT5_AVAILABLE:
+            return None
+            
         if not self.is_connected(user_id):
             return None
         info = mt5.account_info()
@@ -46,6 +61,9 @@ class MT5Manager:
         return None
 
     def get_open_trades(self, user_id):
+        if not MT5_AVAILABLE:
+            return None
+            
         if not self.is_connected(user_id):
             return None
         positions = mt5.positions_get()
@@ -67,6 +85,9 @@ class MT5Manager:
         return trades
 
     def place_trade(self, user_id, symbol, trade_type, lot, sl, tp):
+        if not MT5_AVAILABLE:
+            return False, "MetaTrader5 package not available"
+            
         if not self.is_connected(user_id):
             return False, "Not connected to MT5"
         symbol_info = mt5.symbol_info(symbol)
