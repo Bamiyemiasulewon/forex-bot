@@ -196,10 +196,6 @@ commands_message = '''🎮 **BOT COMMANDS**
 /account - Show account info
 /buy - Place buy market order
 /sell - Place sell market order
-/buylimit - Place buy limit order
-/selllimit - Place sell limit order
-/buystop - Place buy stop order
-/sellstop - Place sell stop order
 /positions - Show open positions
 /orders - Show pending orders
 /close - Close specific position
@@ -207,10 +203,6 @@ commands_message = '''🎮 **BOT COMMANDS**
 /modify - Modify SL/TP
 /cancel - Cancel pending order
 /price - Get current price
-/spread - Get current spread
-/symbols - Available symbols
-/riskcalc - Calculate lot size
-/pipvalue - Calculate pip value
 /summary - Trading summary
 /profit - Current P&L
 
@@ -227,21 +219,17 @@ commands_message = '''🎮 **BOT COMMANDS**
 
 **Calculators & Tools**
 /risk [PAIR] [RISK%] [SL PIPS] - Calculate position size
-/pipcalc [PAIR] [SIZE] - Calculate pip values
 
 **Information**
 /strategies - Learn about our strategies
-/donate - Support the bot
 /help - Show this command list
 
 💡 **Tips:**
-• Use /risk or /pipcalc without parameters for help
+• Use /risk without parameters for help
 • All commands support major currency pairs
 • Risk % should be 0.1-5% for safety'''
 
-donation_message = '''❤️ **Enjoying the Bot?**
-This bot is, and always will be, 100% free. If you find it valuable, please consider supporting its development with a donation.
-**[Link to your donation page/address]**'''
+donation_message = ''
 
 # --- Keyboards ---
 def get_main_keyboard():
@@ -354,9 +342,7 @@ async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT
                 "`/analysis [PAIR]` - Technical analysis for a pair",
                 "`/trades` - View your trade history",
                 "`/risk [PAIR] [RISK%] [SL PIPS]` - Calculate position size",
-                "`/pipcalc [PAIR] [SIZE]` - Calculate pip values",
                 "`/strategies` - Learn about our strategies",
-                "`/donate` - Support the bot",
                 "`/help` - Show this command list"
             ])
         )
@@ -544,60 +530,6 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_msg = "❌ Currency pair not supported"
         await loading_msg.edit_text(error_msg)
 
-async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 2:
-        help_text = (
-            "📏 **Pip Calculator Help:**\n\n"
-            "**Format:** `/pipcalc [pair] [trade size]`\n"
-            "**Examples:**\n"
-            "• `/pipcalc EURUSD 1` - 1 lot\n"
-            "• `/pipcalc GBPJPY 0.5` - 0.5 lots\n"
-            "• `/pipcalc USDJPY 0.1` - 0.1 lots\n\n"
-            "💡 *Trade size is in lots (1 lot = 100,000 units)*"
-        )
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-        return
-    pair = context.args[0].upper()
-    try:
-        trade_size = float(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Invalid trade size. Please enter a valid number.")
-        return
-    if trade_size <= 0:
-        await update.message.reply_text("❌ Trade size must be greater than 0.")
-        return
-    loading_msg = await update.message.reply_text("🔄 Calculating pip value...")
-    try:
-        data = await api_service.make_api_call(f"/api/pipcalc/{pair}/{trade_size}")
-        if not data or "error" in data:
-            error_msg = data.get("error", "Could not calculate pip value.")
-            await loading_msg.edit_text(f"❌ {error_msg}")
-            return
-        pip_value = data['pip_value_usd']
-        contract_size = trade_size * 100000
-        pip_movements = {
-            "1 pip": pip_value * 1,
-            "5 pips": pip_value * 5,
-            "10 pips": pip_value * 10,
-            "20 pips": pip_value * 20,
-            "50 pips": pip_value * 50,
-            "100 pips": pip_value * 100,
-        }
-        table = "\n".join([f"• {pips} = ${value:,.2f}" for pips, value in pip_movements.items()])
-        response = (
-            f"📏 **Pip Calculator - {data['pair']}**\n\n"
-            f"💰 **Trade Size:** `{data['trade_size']}` lots ({int(contract_size):,} units)\n"
-            f"📊 **Pip Value:** `${pip_value:,.2f}`\n\n"
-            f"**Pip Movement Table:**\n{table}\n\n"
-            f"💡 *Each pip movement is worth ${pip_value:,.2f} of profit or loss.*"
-        )
-        await loading_msg.edit_text(response, parse_mode='Markdown')
-    except Exception as e:
-        await loading_msg.edit_text("❌ An unexpected error occurred. Please try again.")
-
-async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(donation_message, parse_mode='Markdown', disable_web_page_preview=True)
-    
 async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loading_msg = await update.message.reply_text("📋 Fetching trade history...")
     try:
@@ -1380,11 +1312,8 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('market', market))
     app.add_handler(CommandHandler('analysis', analysis))
     app.add_handler(CommandHandler('risk', risk))
-    app.add_handler(CommandHandler('pipcalc', pipcalc))
-    app.add_handler(CommandHandler('donate', donate))
     app.add_handler(CommandHandler('trades', trades))
     app.add_handler(CommandHandler('strategies', strategies))
-    
     # MT5 Trading Commands
     app.add_handler(CommandHandler('connect', connect))
     app.add_handler(CommandHandler('status', status))
@@ -1579,10 +1508,6 @@ async def set_bot_commands(application):
         ("account", "Show account info"),
         ("buy", "Place buy market order"),
         ("sell", "Place sell market order"),
-        ("buylimit", "Place buy limit order"),
-        ("selllimit", "Place sell limit order"),
-        ("buystop", "Place buy stop order"),
-        ("sellstop", "Place sell stop order"),
         ("positions", "Show open positions"),
         ("orders", "Show pending orders"),
         ("close", "Close specific position"),
@@ -1590,14 +1515,7 @@ async def set_bot_commands(application):
         ("modify", "Modify SL/TP"),
         ("cancel", "Cancel pending order"),
         ("price", "Get current price"),
-        ("spread", "Get current spread"),
-        ("symbols", "Available symbols"),
-        ("riskcalc", "Calculate lot size"),
-        ("pipcalc", "Calculate pip values"),
+        ("summary", "Trading summary"),
         ("strategies", "Learn about our strategies"),
-        ("donate", "Support the bot"),
         ("help", "Show this command list")
     ])
-
-# In your main() or startup logic, after Application is created and before polling:
-# await set_bot_commands(application)
