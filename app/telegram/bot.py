@@ -945,102 +945,26 @@ async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(f"❌ **Account Check Failed:** {str(e)}")
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Buy market order"""
-    if len(context.args) < 2:
-        help_text = (
-            "📈 **Buy Market Order Help:**\n\n"
-            "**Format:** `/buy [symbol] [lot] [sl] [tp]`\n"
-            "**Examples:**\n"
-            "• `/buy EURUSD 0.1` - Buy 0.1 lot EURUSD\n"
-            "• `/buy GBPUSD 0.05 1.2500 1.2700` - With SL and TP\n\n"
-            "💡 *Use 5-digit prices, decimal lots (0.01, 0.1, 1.0)*"
-        )
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-        return
+    """Initiates a multi-step process to place a buy order."""
+    user_id = update.effective_user.id
+    session_manager.create_session(user_id, "buy_order")
     
-    symbol = context.args[0].upper()
-    try:
-        lot = float(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Invalid lot size. Please enter a valid number.")
-        return
-    
-    sl = float(context.args[2]) if len(context.args) > 2 else None
-    tp = float(context.args[3]) if len(context.args) > 3 else None
-    
-    loading_msg = await update.message.reply_text(f"📈 Placing buy order for {symbol}...")
-    
-    try:
-        order_data = {
-            "symbol": symbol,
-            "lot": lot,
-            "type": "buy"
-        }
-        if sl:
-            order_data["sl"] = sl
-        if tp:
-            order_data["tp"] = tp
-        
-        data = await api_service.make_api_call("/api/mt5/order", method="POST", json=order_data)
-        
-        if data and data.get("success"):
-            ticket = data.get("ticket", "N/A")
-            await loading_msg.edit_text(f"✅ **Buy Order Placed Successfully!**\n\n**Ticket:** {ticket}\n**Symbol:** {symbol}\n**Lot:** {lot}")
-        else:
-            error_msg = data.get("error", "Order failed. Please check your inputs.")
-            await loading_msg.edit_text(f"❌ **Order Failed:** {error_msg}")
-            
-    except Exception as e:
-        await loading_msg.edit_text("❌ Error placing order. Please try again.")
+    await update.message.reply_text(
+        "📈 **Buy Order Setup**\n\n"
+        "Please enter the symbol you want to buy (e.g., EURUSD, GBPJPY).",
+        parse_mode='Markdown'
+    )
 
 async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sell market order"""
-    if len(context.args) < 2:
-        help_text = (
-            "📉 **Sell Market Order Help:**\n\n"
-            "**Format:** `/sell [symbol] [lot] [sl] [tp]`\n"
-            "**Examples:**\n"
-            "• `/sell EURUSD 0.1` - Sell 0.1 lot EURUSD\n"
-            "• `/sell GBPUSD 0.05 1.2700 1.2500` - With SL and TP\n\n"
-            "💡 *Use 5-digit prices, decimal lots (0.01, 0.1, 1.0)*"
-        )
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-        return
+    """Initiates a multi-step process to place a sell order."""
+    user_id = update.effective_user.id
+    session_manager.create_session(user_id, "sell_order")
     
-    symbol = context.args[0].upper()
-    try:
-        lot = float(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Invalid lot size. Please enter a valid number.")
-        return
-    
-    sl = float(context.args[2]) if len(context.args) > 2 else None
-    tp = float(context.args[3]) if len(context.args) > 3 else None
-    
-    loading_msg = await update.message.reply_text(f"📉 Placing sell order for {symbol}...")
-    
-    try:
-        order_data = {
-            "symbol": symbol,
-            "lot": lot,
-            "type": "sell"
-        }
-        if sl:
-            order_data["sl"] = sl
-        if tp:
-            order_data["tp"] = tp
-        
-        data = await api_service.make_api_call("/api/mt5/order", method="POST", json=order_data)
-        
-        if data and data.get("success"):
-            ticket = data.get("ticket", "N/A")
-            await loading_msg.edit_text(f"✅ **Sell Order Placed Successfully!**\n\n**Ticket:** {ticket}\n**Symbol:** {symbol}\n**Lot:** {lot}")
-        else:
-            error_msg = data.get("error", "Order failed. Please check your inputs.")
-            await loading_msg.edit_text(f"❌ **Order Failed:** {error_msg}")
-            
-    except Exception as e:
-        await loading_msg.edit_text("❌ Error placing order. Please try again.")
+    await update.message.reply_text(
+        "📉 **Sell Order Setup**\n\n"
+        "Please enter the symbol you want to sell (e.g., EURUSD, GBPJPY).",
+        parse_mode='Markdown'
+    )
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show open positions"""
@@ -1149,7 +1073,7 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "**Examples:**\n"
             "• `/price EURUSD`\n"
             "• `/price GBPUSD`\n\n"
-            "💡 *Use `/symbols` to see available symbols*"
+            "💡 *Use /symbols to see available symbols*"
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
         return
@@ -1157,23 +1081,31 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     loading_msg = await update.message.reply_text(f"💰 Fetching price for {symbol}...")
     
+    endpoint = f"/api/mt5/price/{symbol}"
+    logger.info(f"Calling price endpoint: {api_service.base_url}{endpoint}")
+
     try:
-        data = await api_service.make_api_call(f"/api/mt5/price/{symbol}")
+        data = await api_service.make_api_call(endpoint)
         
         if data:
-            response = (
-                f"💰 **{symbol} Current Price**\n\n"
-                f"**Bid:** {data.get('bid', 'N/A')}\n"
-                f"**Ask:** {data.get('ask', 'N/A')}\n"
-                f"**Spread:** {data.get('spread', 'N/A')} pips"
-            )
+            if "error" in data:
+                logger.error(f"API returned an error for /price: {data['error']}")
+                await loading_msg.edit_text(f"❌ Error: {data['error']}")
+            else:
+                response = (
+                    f"💰 **{symbol} Current Price**\n\n"
+                    f"**Bid:** {data.get('bid', 'N/A')}\n"
+                    f"**Ask:** {data.get('ask', 'N/A')}\n"
+                    f"**Spread:** {data.get('spread', 'N/A')} pips"
+                )
+                await loading_msg.edit_text(response, parse_mode='Markdown')
         else:
-            response = f"❌ Could not fetch price for {symbol}."
-        
-        await loading_msg.edit_text(response, parse_mode='Markdown')
+            response = f"❌ Could not fetch price for {symbol}. The API server might be down or the symbol is invalid."
+            await loading_msg.edit_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        await loading_msg.edit_text("❌ Error fetching price. Please try again.")
+        logger.error(f"Exception in /price command for symbol {symbol}: {e}", exc_info=True)
+        await loading_msg.edit_text("❌ An unexpected error occurred while fetching the price. Please check the logs.")
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Trading summary"""
@@ -1199,6 +1131,21 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await loading_msg.edit_text("❌ Error fetching summary. Please try again.")
 
+async def modify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initiates a multi-step process to modify a position."""
+    user_id = update.effective_user.id
+    
+    # Start a new session for modifying a position
+    session_manager.create_session(user_id, "modify_position")
+    
+    # Ask for the ticket number
+    await update.message.reply_text(
+        "📝 **Modify Position**\n\n"
+        "Please enter the ticket number of the position you want to modify.\n\n"
+        "You can find the ticket number using the /positions command.",
+        parse_mode='Markdown'
+    )
+
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_personal_menu(update, context)
 
@@ -1211,11 +1158,18 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
     # Check if user has an active session
     session = session_manager.get_session(user_id)
     
-    if session and session['type'] == 'mt5_connect':
-        # Handle MT5 connection multi-step process
-        await handle_mt5_connect_step(update, context, text, session)
-        return
-    
+    if session:
+        session_type = session.get('type')
+        if session_type == 'mt5_connect':
+            await handle_mt5_connect_step(update, context, text, session)
+            return
+        elif session_type in ['buy_order', 'sell_order']:
+            await handle_order_step(update, context, text, session)
+            return
+        elif session_type == 'modify_position':
+            await handle_modify_step(update, context, text, session)
+            return
+            
     # Default reply keyboard handling
     if text == "📋 Menu":
         await show_personal_menu(update, context)
@@ -1303,6 +1257,252 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
+async def handle_order_step(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, session: dict):
+    """Handle individual steps of the order placement process."""
+    user_id = update.effective_user.id
+    current_data = session['data']
+    order_type = session['type'].split('_')[0] # 'buy' or 'sell'
+
+    if 'symbol' not in current_data:
+        # Step 1: Collect symbol
+        session_manager.update_session(user_id, 'symbol', text.upper())
+        
+        keyboard = [
+            [InlineKeyboardButton("0.01 lots", callback_data="order_lot:0.01"), InlineKeyboardButton("0.1 lots", callback_data="order_lot:0.1")],
+            [InlineKeyboardButton("0.5 lots", callback_data="order_lot:0.5"), InlineKeyboardButton("1.0 lots", callback_data="order_lot:1.0")]
+        ]
+        
+        await update.message.reply_text(
+            "What lot size do you want to use?\n\nYou can select a size or type your own.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif 'lot' not in current_data:
+        # Step 2: Collect lot size
+        try:
+            lot = float(text)
+            if lot <= 0:
+                await update.message.reply_text("Lot size must be positive. Please try again.")
+                return
+            session_manager.update_session(user_id, 'lot', lot)
+            keyboard = [[InlineKeyboardButton("Skip SL/TP", callback_data="order_skip_sltp")]]
+            await update.message.reply_text(
+                "Enter the Stop Loss price (or skip).",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except ValueError:
+            await update.message.reply_text("Invalid number. Please enter a valid lot size.")
+
+    elif 'sl' not in current_data:
+        # Step 3: Collect Stop Loss
+        try:
+            sl = float(text) if text.lower() != 'skip' else 0.0
+            session_manager.update_session(user_id, 'sl', sl)
+            keyboard = [[InlineKeyboardButton("Skip TP", callback_data="order_skip_tp")]]
+            await update.message.reply_text(
+                "Enter the Take Profit price (or skip).",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except ValueError:
+            await update.message.reply_text("Invalid price. Please enter a valid number for Stop Loss.")
+
+    elif 'tp' not in current_data:
+        # Step 4: Collect Take Profit and confirm
+        try:
+            tp = float(text) if text.lower() != 'skip' else 0.0
+            session_manager.update_session(user_id, 'tp', tp)
+
+            # All data collected, show confirmation
+            await show_order_confirmation(update, context, session)
+
+        except ValueError:
+            await update.message.reply_text("Invalid price. Please enter a valid number for Take Profit.")
+
+async def show_order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict):
+    """Display order details and ask for confirmation."""
+    order_data = session['data']
+    order_type = session['type'].split('_')[0].upper()
+    
+    confirmation_text = (
+        f"**Confirm Your Order**\n\n"
+        f"**Type:** {order_type}\n"
+        f"**Symbol:** {order_data['symbol']}\n"
+        f"**Lot Size:** {order_data['lot']}\n"
+        f"**Stop Loss:** {order_data['sl'] if order_data['sl'] > 0 else 'N/A'}\n"
+        f"**Take Profit:** {order_data['tp'] if order_data['tp'] > 0 else 'N/A'}\n\n"
+        "Do you want to place this order?"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Confirm", callback_data="order_confirm"),
+         InlineKeyboardButton("❌ Cancel", callback_data="order_cancel")]
+    ]
+    await update.message.reply_text(confirmation_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def handle_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle callbacks from the order process."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = session_manager.get_session(user_id)
+    if not session:
+        await query.edit_message_text("Your session has expired. Please start over.")
+        return
+
+    action = query.data.split(':')[0]
+    
+    if action == "order_lot":
+        lot = float(query.data.split(':')[1])
+        session_manager.update_session(user_id, 'lot', lot)
+        keyboard = [[InlineKeyboardButton("Skip SL/TP", callback_data="order_skip_sltp")]]
+        await query.edit_message_text(
+            f"Lot size set to {lot}. Now, enter the Stop Loss price (or skip).",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif action == "order_skip_sltp":
+        session_manager.update_session(user_id, 'sl', 0.0)
+        session_manager.update_session(user_id, 'tp', 0.0)
+        await show_order_confirmation(query, context, session)
+
+    elif action == "order_skip_tp":
+        session_manager.update_session(user_id, 'tp', 0.0)
+        await show_order_confirmation(query, context, session)
+
+    elif action == "order_confirm":
+        await place_final_order(query, context, session)
+
+    elif action == "order_cancel":
+        session_manager.clear_session(user_id)
+        await query.edit_message_text("Order cancelled.")
+
+async def place_final_order(query: Update, context: ContextTypes.DEFAULT_TYPE, session: dict):
+    """Place the final order after confirmation."""
+    await query.edit_message_text("Placing order...")
+    
+    order_data = session['data']
+    order_type = session['type'].split('_')[0]
+    
+    api_payload = {
+        "symbol": order_data['symbol'],
+        "lot": order_data['lot'],
+        "type": order_type,
+    }
+    if order_data['sl'] > 0:
+        api_payload['sl'] = order_data['sl']
+    if order_data['tp'] > 0:
+        api_payload['tp'] = order_data['tp']
+        
+    try:
+        data = await api_service.make_api_call("/api/mt5/order", method="POST", json=api_payload)
+        
+        if data and data.get("success"):
+            ticket = data.get("ticket", "N/A")
+            await query.edit_message_text(f"✅ **Order Placed Successfully!**\n\n**Ticket:** {ticket}")
+        else:
+            error_msg = data.get("error", "Order failed. Please check your inputs.")
+            await query.edit_message_text(f"❌ **Order Failed:** {error_msg}")
+            
+    except Exception as e:
+        await query.edit_message_text("❌ Error placing order. Please try again.")
+    finally:
+        session_manager.clear_session(query.from_user.id)
+
+async def handle_modify_step(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, session: dict):
+    """Handle individual steps of the position modification process."""
+    user_id = update.effective_user.id
+    current_data = session['data']
+
+    if 'ticket' not in current_data:
+        # Step 1: Collect Ticket Number
+        try:
+            ticket = int(text)
+            session_manager.update_session(user_id, 'ticket', ticket)
+            await update.message.reply_text("Enter the new Stop Loss price. Type '0' to remove it.")
+        except ValueError:
+            await update.message.reply_text("Invalid ticket number. Please enter a valid number.")
+
+    elif 'sl' not in current_data:
+        # Step 2: Collect new Stop Loss
+        try:
+            sl = float(text)
+            session_manager.update_session(user_id, 'sl', sl)
+            await update.message.reply_text("Enter the new Take Profit price. Type '0' to remove it.")
+        except ValueError:
+            await update.message.reply_text("Invalid price. Please enter a valid number for Stop Loss.")
+
+    elif 'tp' not in current_data:
+        # Step 3: Collect new Take Profit and confirm
+        try:
+            tp = float(text)
+            session_manager.update_session(user_id, 'tp', tp)
+            
+            # All data collected, show confirmation
+            ticket = current_data['ticket']
+            sl = current_data['sl']
+
+            confirmation_text = (
+                f"**Confirm Modification**\n\n"
+                f"**Ticket:** {ticket}\n"
+                f"**New Stop Loss:** {sl if sl > 0 else 'Remove'}\n"
+                f"**New Take Profit:** {tp if tp > 0 else 'Remove'}\n\n"
+                "Do you want to apply these changes?"
+            )
+            keyboard = [
+                [InlineKeyboardButton("✅ Confirm", callback_data="modify_confirm"),
+                 InlineKeyboardButton("❌ Cancel", callback_data="modify_cancel")]
+            ]
+            await update.message.reply_text(confirmation_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+        except ValueError:
+            await update.message.reply_text("Invalid price. Please enter a valid number for Take Profit.")
+
+async def handle_modify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle callbacks from the modify process."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    session = session_manager.get_session(user_id)
+    if not session:
+        await query.edit_message_text("Your session has expired. Please start over with /modify.")
+        return
+
+    action = query.data
+
+    if action == "modify_confirm":
+        await place_final_modification(query, context, session)
+    elif action == "modify_cancel":
+        session_manager.clear_session(user_id)
+        await query.edit_message_text("Modification cancelled.")
+
+async def place_final_modification(query: Update, context: ContextTypes.DEFAULT_TYPE, session: dict):
+    """Send the final modification request to the API."""
+    await query.edit_message_text("Applying changes...")
+
+    modify_data = session['data']
+    
+    api_payload = {
+        "ticket": modify_data['ticket'],
+        "sl": modify_data['sl'],
+        "tp": modify_data['tp'],
+    }
+    
+    try:
+        data = await api_service.make_api_call("/api/mt5/modify", method="POST", json=api_payload)
+        
+        if data and data.get("success"):
+            await query.edit_message_text(f"✅ **Position {modify_data['ticket']} Modified Successfully!**")
+        else:
+            error_msg = data.get("error", "Failed to modify position.")
+            await query.edit_message_text(f"❌ **Modification Failed:** {error_msg}")
+            
+    except Exception as e:
+        await query.edit_message_text("❌ An unexpected error occurred during modification.")
+    finally:
+        session_manager.clear_session(query.from_user.id)
+
 def setup_handlers(app: Application):
     """Sets up all the command and message handlers for the bot."""
     app.add_handler(CommandHandler('start', start))
@@ -1328,6 +1528,8 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('price', price))
     app.add_handler(CommandHandler('summary', summary))
     app.add_handler(CallbackQueryHandler(handle_personal_callback))
+    app.add_handler(CallbackQueryHandler(handle_order_callback, pattern='^order_'))
+    app.add_handler(CallbackQueryHandler(handle_modify_callback, pattern='^modify_'))
     app.add_handler(MessageHandler(TFilters.TEXT & (~TFilters.COMMAND), reply_keyboard_handler))
     app.add_handler(CommandHandler('cancel', cancel))
     app.add_handler(CommandHandler("orderblock", orderblock_command))
@@ -1336,6 +1538,7 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler("orderblock_signals", orderblock_signals))
     app.add_handler(CommandHandler("orderblock_performance", orderblock_performance))
     app.add_handler(CommandHandler("orderblock_settings", orderblock_settings))
+    app.add_handler(CommandHandler("modify", modify_command))
 
 async def run_network_diagnostics():
     """Run comprehensive network diagnostics."""

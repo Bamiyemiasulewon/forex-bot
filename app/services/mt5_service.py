@@ -533,5 +533,43 @@ class MT5Service:
             logger.error(f"MT5 summary error: {e}")
             return None
 
+    async def modify_position(self, ticket: int, sl: float, tp: float) -> Dict[str, Any]:
+        """Modify the Stop Loss and Take Profit of an open position."""
+        if not MT5_AVAILABLE:
+            return {"success": False, "error": "MetaTrader5 package not available"}
+        if not self.connected:
+            return {"success": False, "error": "Not connected to MT5"}
+
+        try:
+            # Get the position
+            position = mt5.positions_get(ticket=ticket)
+            if not position or len(position) == 0:
+                return {"success": False, "error": f"Position with ticket {ticket} not found."}
+            position = position[0]
+
+            # Prepare the request
+            request = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "position": ticket,
+                "sl": sl,
+                "tp": tp,
+            }
+
+            # Send the request
+            result = mt5.order_send(request)
+
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Successfully modified position {ticket}. New SL: {sl}, New TP: {tp}")
+                return {"success": True, "ticket": ticket, "sl": sl, "tp": tp}
+            else:
+                error_message = f"Failed to modify position {ticket}. Reason: {result.comment} (Code: {result.retcode})"
+                logger.error(error_message)
+                return {"success": False, "error": error_message}
+
+        except Exception as e:
+            error_message = f"An unexpected error occurred while modifying position {ticket}: {e}"
+            logger.error(error_message, exc_info=True)
+            return {"success": False, "error": error_message}
+
 # Global MT5 service instance
 mt5_service = MT5Service() 

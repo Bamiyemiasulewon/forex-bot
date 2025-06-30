@@ -488,6 +488,29 @@ async def mt5_summary():
         logger.error(f"Error getting summary: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/api/mt5/modify")
+async def mt5_modify_position(modification: dict):
+    """Modify an existing MT5 position."""
+    try:
+        ticket = int(modification.get("ticket"))
+        sl = float(modification.get("sl", 0.0))
+        tp = float(modification.get("tp", 0.0))
+        
+        if not ticket:
+            raise HTTPException(status_code=400, detail="Ticket number is required.")
+            
+        result = await mt5_service.modify_position(ticket, sl, tp)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Failed to modify position."))
+            
+        logger.info(f"Successfully initiated modification for ticket {ticket}")
+        return result
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ticket, SL, or TP format. Please use numbers.")
+    except Exception as e:
+        logger.error(f"Error modifying MT5 position: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """Global exception handler."""
