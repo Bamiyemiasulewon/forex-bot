@@ -33,7 +33,7 @@ class OrderBlockRSIFibStrategy:
         
         # Risk management parameters
         self.risk_per_trade = 0.10  # 10%
-        self.max_trades_per_day = 3
+        self.max_trades_per_day = 10
         self.max_daily_loss = 0.10  # 10%
         self.stop_trading_on_drawdown = True
         

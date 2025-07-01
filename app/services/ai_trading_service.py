@@ -3,6 +3,7 @@ import asyncio
 import logging
 import pandas as pd
 import pandas_ta as ta
+import datetime
 
 from .ai_config import AIConfig
 from .ai_risk_manager import AIRiskManager
@@ -31,7 +32,8 @@ class AITradingService:
             return
         self.is_running = True
         logger.info("🤖 AI Trading Service started.")
-        # The supervisor now manages this loop.
+        # Start daily reset task
+        asyncio.create_task(self._daily_reset_task())
         # This method will now run until self.is_running is False.
         await self._run_cycle()
 
@@ -40,10 +42,33 @@ class AITradingService:
         self.is_running = False
         logger.info("🛑 AI Trading Service stopped.")
 
+    async def _daily_reset_task(self):
+        """Background task to reset daily counters at midnight broker/server time, Monday to Friday."""
+        while self.is_running:
+            now = await self.mt5.get_server_time()
+            # Calculate seconds until next midnight
+            next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            seconds_until_midnight = (next_midnight - now).total_seconds()
+            await asyncio.sleep(seconds_until_midnight)
+            # Only reset if it's a weekday (Monday=0, ..., Friday=4)
+            weekday = next_midnight.weekday()
+            if weekday < 5:
+                try:
+                    self.risk_manager.reset_daily_counters()
+                    logger.info("Daily trade counters reset at midnight broker/server time.")
+                except Exception as e:
+                    logger.error(f"Failed to reset daily counters: {e}")
+
     async def _run_cycle(self):
         """The main trading loop that runs periodically."""
         while self.is_running:
             try:
+                # Only trade Monday to Friday (broker/server time)
+                now = await self.mt5.get_server_time()
+                if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
+                    logger.info("Weekend detected (broker/server time). AI trading paused.")
+                    await asyncio.sleep(self.config.LOOP_INTERVAL_SECONDS)
+                    continue
                 logger.info("AI cycle starting...")
                 if not self.mt5.connected:
                     logger.warning("MT5 not connected, skipping cycle.")
@@ -72,6 +97,19 @@ class AITradingService:
         all_positions = await self.mt5.get_positions()
         if len(all_positions) >= self.config.MAX_TOTAL_OPEN_TRADES:
             logger.warning(f"Maximum total trades of {self.config.MAX_TOTAL_OPEN_TRADES} reached. AI is pausing.")
+            return
+
+        # Per-pair daily loss prevention
+        balance_info = await self.mt5.get_balance()
+        if not balance_info:
+            logger.error("Could not fetch account balance. Cannot execute trade.")
+            return
+        balance = balance_info['balance']
+        # Set per-pair daily loss threshold (e.g., 2% of balance)
+        pair_loss_limit = balance * 0.02
+        pair_loss = self.risk_manager.daily_pair_pnl.get(symbol, 0.0)
+        if pair_loss < 0 and abs(pair_loss) >= pair_loss_limit:
+            logger.warning(f"Daily loss limit reached for {symbol}: {pair_loss:.2f} >= {pair_loss_limit:.2f}. No more trades for this pair today.")
             return
 
         if self.config.AVOID_OPPOSING_MANUAL_TRADES:
@@ -138,7 +176,7 @@ class AITradingService:
         )
 
         if result and result.get("success"):
-            self.risk_manager.record_trade_opened()
+            self.risk_manager.record_trade_opened(pair=symbol)
             trade_info = {
                 "symbol": symbol,
                 "type": signal,

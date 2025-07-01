@@ -8,6 +8,7 @@ import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from .ai_config import AIConfig
+from app.services.database_service import get_db_dependency, Trade, get_or_create_user, SessionLocal
 
 try:
     import MetaTrader5 as mt5
@@ -219,10 +220,12 @@ class MT5Service:
             return None
     
     async def place_order(self, symbol: str, lot: float, order_type: str,
-                        sl_pips: int = None, tp_pips: int = None, magic_number: int = 0, price: float = None) -> Dict[str, Any]:
+                        sl_pips: int = None, tp_pips: int = None, magic_number: int = 0, price: float = None, user_id: int = None) -> Dict[str, Any]:
         """
         Places a trade order on MT5. Includes Stop Loss and Take Profit in pips.
         Supports both market and limit orders.
+        Records the trade in the database if user_id is provided.
+        Always sets SL/TP if provided.
         """
         if not MT5_AVAILABLE:
             return {"success": False, "error": "MetaTrader5 package not available"}
@@ -256,6 +259,19 @@ class MT5Service:
             else:
                 return {"success": False, "error": "Invalid order type. Use 'buy' or 'sell'"}
             
+            # Prepare the order request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": lot,
+                "type": order_type_mt5,
+                "price": market_price,
+                "deviation": 10,
+                "magic": magic_number,
+                "comment": "AI Trade",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC
+            }
             # Calculate stop loss and take profit prices only if provided
             sl_price = None
             tp_price = None
@@ -269,24 +285,7 @@ class MT5Service:
                     tp_price = market_price + abs(tp_pips) * symbol_info.point
                 else:
                     tp_price = market_price - abs(tp_pips) * symbol_info.point
-
-            # Distinguish between market and limit orders
-            is_limit_order = price is not None
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL if not is_limit_order else mt5.TRADE_ACTION_PENDING,
-                "symbol": symbol,
-                "volume": lot,
-                "type": order_type_mt5 if not is_limit_order else (mt5.ORDER_TYPE_BUY_LIMIT if order_type_lower == "buy" else mt5.ORDER_TYPE_SELL_LIMIT),
-                "deviation": 20,
-                "magic": magic_number,
-                "comment": "AI Trade" if magic_number == AIConfig.AI_MAGIC_NUMBER else "Manual Trade",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
-            }
-            if is_limit_order:
-                request["price"] = price
-            else:
-                request["price"] = market_price
+            # Always set SL/TP if provided (AI trades must have them)
             if sl_price is not None:
                 request["sl"] = sl_price
             if tp_price is not None:
@@ -300,6 +299,25 @@ class MT5Service:
                 return {"success": False, "error": f"Order failed: {result.comment}"}
             
             logger.info(f"Order placed successfully: {result.order}")
+            # Record trade in DB
+            if user_id is not None:
+                db = SessionLocal()
+                try:
+                    trade = Trade(
+                        user_id=user_id,
+                        symbol=symbol,
+                        order_type=order_type,
+                        entry_price=result.price,
+                        stop_loss=sl_pips,
+                        take_profit=tp_pips,
+                        status='open',
+                    )
+                    db.add(trade)
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to record trade in DB: {e}")
+                finally:
+                    db.close()
             return {
                 "success": True,
                 "ticket": result.order,
@@ -394,21 +412,22 @@ class MT5Service:
         }
         return order_types.get(order_type, "unknown")
     
-    async def close_position(self, ticket: int) -> Dict[str, Any]:
-        """Close a specific position."""
+    async def close_position(self, ticket: int, user_id: int = None, reason: str = "manual") -> Dict[str, Any]:
+        """Close a specific position and update trade in DB if user_id is provided. Logs the closure reason. Blocks non-manual closes for AI trades."""
         if not MT5_AVAILABLE:
             return {"success": False, "error": "MetaTrader5 package not available"}
-            
         if not self.connected:
             return {"success": False, "error": "Not connected to MT5"}
-        
         try:
             # Get position info
             position = mt5.positions_get(ticket=ticket)
             if not position:
                 return {"success": False, "error": "Position not found"}
-            
             position = position[0]
+            # BLOCK: If AI trade and not manual close, do not allow
+            if hasattr(position, 'magic') and position.magic == AIConfig.AI_MAGIC_NUMBER and reason != "manual":
+                logger.warning(f"Blocked non-manual close attempt for AI trade ticket {ticket}.")
+                return {"success": False, "error": "AI trades can only be closed manually or by SL/TP."}
             
             # Get current tick
             tick = mt5.symbol_info_tick(position.symbol)
@@ -443,7 +462,21 @@ class MT5Service:
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 return {"success": False, "error": f"Close failed: {result.comment}"}
             
-            logger.info(f"Position {ticket} closed successfully")
+            logger.info(f"Position {ticket} closed. Reason: {reason}. User: {user_id if user_id else 'N/A'}")
+            # Update trade in DB
+            if user_id is not None:
+                db = SessionLocal()
+                try:
+                    trade = db.query(Trade).filter(Trade.user_id == user_id, Trade.symbol == position.symbol, Trade.status == 'open').order_by(Trade.created_at.desc()).first()
+                    if trade:
+                        trade.close_price = price
+                        trade.status = 'closed'
+                        trade.pnl = position.profit
+                        db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to update trade in DB: {e}")
+                finally:
+                    db.close()
             return {
                 "success": True,
                 "ticket": ticket,
@@ -503,8 +536,11 @@ class MT5Service:
             if tick is None:
                 return None
             
-            # Calculate spread in pips
-            spread_pips = (tick.ask - tick.bid) / symbol_info.point
+            # Calculate spread in pips (standardized)
+            if "JPY" in symbol:
+                spread_pips = (tick.ask - tick.bid) / 0.01
+            else:
+                spread_pips = (tick.ask - tick.bid) / 0.0001
             
             price_data = {
                 "symbol": symbol.upper(),
@@ -597,56 +633,66 @@ class MT5Service:
         """
         Calculates the value of one pip for a given symbol and lot size, for a USD account.
         """
-        if not self.connected:
+        if not MT5_AVAILABLE:
+            logger.warning("MetaTrader5 package not available")
             return 0.0
-
-        symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info:
-            logger.error(f"Failed to get symbol info for {symbol}")
-            return 0.0
-
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            logger.error(f"Failed to get tick data for {symbol}")
-            return 0.0
-
-        contract_size = symbol_info.contract_size
-        point = symbol_info.point
-        
-        # Determine the pip size (e.g., 0.0001 for EURUSD, 0.01 for USDJPY)
-        pip_size = point * 10 if "JPY" not in symbol else 0.01
-        
-        # Calculate the value of one pip in the quote currency
-        pip_value_in_quote = pip_size * contract_size * lot_size
-
-        quote_currency = symbol[3:]
-        
-        if quote_currency == 'USD':
-            # If the quote currency is USD, the value is direct
-            return pip_value_in_quote
-        
-        elif symbol.startswith('USD'):
-            # For pairs like USD/JPY, USD/CAD
-            return pip_value_in_quote / tick.ask
-
-        else:
-            # For cross pairs like EUR/GBP, GBP/JPY, we need to convert from quote to USD
-            # We need the exchange rate for Quote/USD
-            conversion_pair = f"{quote_currency}USD"
-            conversion_tick = mt5.symbol_info_tick(conversion_pair)
             
-            if conversion_tick:
-                return pip_value_in_quote * conversion_tick.ask
+        if not self.connected:
+            logger.warning("MT5 not connected")
+            return 0.0
+
+        try:
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"Failed to get symbol info for {symbol}")
+                return 0.0
+
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                logger.error(f"Failed to get tick data for {symbol}")
+                return 0.0
+
+            # Use trade_contract_size instead of contract_size
+            contract_size = getattr(symbol_info, 'trade_contract_size', 100000)  # Default to 100000 if not available
+            point = symbol_info.point
+            
+            # Determine the pip size (e.g., 0.0001 for EURUSD, 0.01 for USDJPY)
+            pip_size = point * 10 if "JPY" not in symbol else 0.01
+            
+            # Calculate the value of one pip in the quote currency
+            pip_value_in_quote = pip_size * contract_size * lot_size
+
+            quote_currency = symbol[3:]
+            
+            if quote_currency == 'USD':
+                # If the quote currency is USD, the value is direct
+                return pip_value_in_quote
+            
+            elif symbol.startswith('USD'):
+                # For pairs like USD/JPY, USD/CAD
+                return pip_value_in_quote / tick.ask
+
             else:
-                # If a direct conversion pair doesn't exist (e.g. AUDCAD -> CADUSD)
-                # try the inverse.
-                inverse_conversion_pair = f"USD{quote_currency}"
-                inverse_tick = mt5.symbol_info_tick(inverse_conversion_pair)
-                if inverse_tick:
-                    return pip_value_in_quote / inverse_tick.ask
+                # For cross pairs like EUR/GBP, GBP/JPY, we need to convert from quote to USD
+                # We need the exchange rate for Quote/USD
+                conversion_pair = f"{quote_currency}USD"
+                conversion_tick = mt5.symbol_info_tick(conversion_pair)
+                
+                if conversion_tick:
+                    return pip_value_in_quote * conversion_tick.ask
                 else:
-                    logger.error(f"Cannot determine pip value for {symbol}. No USD conversion rate found for {quote_currency}.")
-                    return 0.0
+                    # If a direct conversion pair doesn't exist (e.g. AUDCAD -> CADUSD)
+                    # try the inverse.
+                    inverse_conversion_pair = f"USD{quote_currency}"
+                    inverse_tick = mt5.symbol_info_tick(inverse_conversion_pair)
+                    if inverse_tick:
+                        return pip_value_in_quote / inverse_tick.ask
+                    else:
+                        logger.error(f"Cannot determine pip value for {symbol}. No USD conversion rate found for {quote_currency}.")
+                        return 0.0
+        except Exception as e:
+            logger.error(f"Error calculating pip value for {symbol}: {e}")
+            return 0.0
 
     async def get_candles(self, symbol: str, timeframe_str: str, count: int):
         """Fetches historical candle data from MT5."""
@@ -681,6 +727,17 @@ class MT5Service:
         except Exception as e:
             logger.error(f"Error fetching candles for {symbol}: {e}", exc_info=True)
             return None
+
+    async def get_server_time(self) -> datetime:
+        """Get the current server/broker time from MT5. Returns UTC if not available."""
+        if not MT5_AVAILABLE or not self.connected:
+            return datetime.utcnow()
+        try:
+            server_time = mt5.symbol_info_tick(self.account_info.get('login', 'EURUSD')).time
+            return datetime.utcfromtimestamp(server_time)
+        except Exception as e:
+            logger.error(f"Failed to fetch server time from MT5: {e}")
+            return datetime.utcnow()
 
 # Global MT5 service instance
 mt5_service = MT5Service() 

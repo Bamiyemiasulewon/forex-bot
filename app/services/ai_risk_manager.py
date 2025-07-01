@@ -20,13 +20,17 @@ class AIRiskManager:
         self.mt5 = mt5_service
         self.daily_trade_count = 0
         self.daily_pnl = 0.0
+        self.daily_pair_trade_count = {}  # {pair: count}
+        self.daily_pair_pnl = {}  # {pair: pnl}
         self.load_state()
 
     def _get_state(self) -> Dict[str, Any]:
         """Gets the current state as a dictionary."""
         return {
             "daily_trade_count": self.daily_trade_count,
-            "daily_pnl": self.daily_pnl
+            "daily_pnl": self.daily_pnl,
+            "daily_pair_trade_count": self.daily_pair_trade_count,
+            "daily_pair_pnl": self.daily_pair_pnl
         }
 
     def save_state(self):
@@ -49,14 +53,18 @@ class AIRiskManager:
                 state = json.load(f)
                 self.daily_trade_count = state.get("daily_trade_count", 0)
                 self.daily_pnl = state.get("daily_pnl", 0.0)
+                self.daily_pair_trade_count = state.get("daily_pair_trade_count", {})
+                self.daily_pair_pnl = state.get("daily_pair_pnl", {})
                 logger.info("AI risk state loaded successfully.")
         except (IOError, json.JSONDecodeError) as e:
             logger.error(f"Error loading AI state, starting fresh: {e}")
 
     def reset_daily_counters(self):
-        """Resets the daily trade counters and P&L."""
+        """Resets the daily trade counters and P&L, including per-pair stats."""
         self.daily_trade_count = 0
         self.daily_pnl = 0.0
+        self.daily_pair_trade_count = {}
+        self.daily_pair_pnl = {}
         logger.info("Daily risk counters have been reset.")
         self.save_state()
 
@@ -106,14 +114,18 @@ class AIRiskManager:
         
         return final_position_size
 
-    def record_trade_opened(self):
-        """Increments the daily trade counter."""
+    def record_trade_opened(self, pair=None):
+        """Increments the daily trade counter, and per-pair if pair is given."""
         self.daily_trade_count += 1
+        if pair:
+            self.daily_pair_trade_count[pair] = self.daily_pair_trade_count.get(pair, 0) + 1
         logger.info(f"Trade opened. Daily trade count is now {self.daily_trade_count}/{self.config.MAX_DAILY_TRADES}.")
         self.save_state()
 
-    def record_trade_closed(self, pnl: float):
-        """Records the P&L of a closed trade."""
+    def record_trade_closed(self, pnl: float, pair=None):
+        """Records the P&L of a closed trade, and per-pair if pair is given."""
         self.daily_pnl += pnl
+        if pair:
+            self.daily_pair_pnl[pair] = self.daily_pair_pnl.get(pair, 0.0) + pnl
         logger.info(f"Trade closed with P&L: ${pnl:.2f}. Total daily P&L: ${self.daily_pnl:.2f}.")
         self.save_state() 

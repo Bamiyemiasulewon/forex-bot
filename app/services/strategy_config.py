@@ -42,7 +42,7 @@ class StrategyConfig:
             },
             "risk_management": {
                 "risk_per_trade": 0.10,  # 10%
-                "max_trades_per_day": 3,
+                "max_trades_per_day": 10,
                 "max_daily_loss": 0.10,  # 10%
                 "risk_reward_ratio": 2.0,  # 1:2
                 "stop_trading_on_drawdown": True

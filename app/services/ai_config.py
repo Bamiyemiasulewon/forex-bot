@@ -21,7 +21,7 @@ class AIConfig:
     # --- Risk Management ---
     RISK_PER_TRADE_PERCENT: float = 5.0
     RISK_REWARD_RATIO: float = 3.0
-    MAX_DAILY_TRADES: int = 4
+    MAX_DAILY_TRADES: int = 10
     MAX_DAILY_RISK_PERCENT: float = 10.0
     MINIMUM_ACCOUNT_BALANCE: float = 20.0
     MAX_ACCOUNT_DRAWDOWN_PERCENT: float = 20.0

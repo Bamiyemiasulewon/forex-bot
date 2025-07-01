@@ -503,8 +503,8 @@ async def mt5_order(order_data: dict):
         order_type = order_data.get("type")
         sl = order_data.get("sl")
         tp = order_data.get("tp")
-        
-        result = await mt5_service.place_order(symbol, lot, order_type, sl, tp)
+        user_id = order_data.get("user_id")
+        result = await mt5_service.place_order(symbol, lot, order_type, sl, tp, user_id=user_id)
         logger.info(f"MT5 order placed: {order_data}")
         return result
     except Exception as e:

@@ -56,12 +56,53 @@ class AITelegramNotifier:
 
     async def send_error_notification(self, error_message: str):
         """Sends an error notification."""
-        message = f"⚠️ **AI Bot Alert**\n\n{error_message}"
+        # Escape special characters that might break Markdown
+        safe_error = self._escape_markdown(error_message)
+        message = f"⚠️ **AI Bot Alert**\n\n{safe_error}"
         await self._send_message(message)
+    
+    def _escape_markdown(self, text: str) -> str:
+        """Escape special characters that might break Markdown parsing."""
+        # Replace characters that have special meaning in Markdown
+        replacements = {
+            '_': '\\_',
+            '*': '\\*',
+            '`': '\\`',
+            '[': '\\[',
+            ']': '\\]',
+            '(': '\\(',
+            ')': '\\)',
+            '#': '\\#',
+            '+': '\\+',
+            '-': '\\-',
+            '=': '\\=',
+            '|': '\\|',
+            '{': '\\{',
+            '}': '\\}',
+            '.': '\\.',
+            '!': '\\!'
+        }
+        
+        for char, escaped in replacements.items():
+            text = text.replace(char, escaped)
+        
+        return text
 
     async def _send_message(self, text: str):
         """Helper method to send a message to the configured chat."""
         try:
+            # First try with Markdown parsing
             await self.bot.send_message(chat_id=self.chat_id, text=text, parse_mode='Markdown')
         except Exception as e:
-            logger.error(f"Failed to send Telegram notification: {e}") 
+            logger.warning(f"Markdown parsing failed, trying without parse_mode: {e}")
+            try:
+                # If Markdown fails, send without parsing
+                await self.bot.send_message(chat_id=self.chat_id, text=text)
+            except Exception as e2:
+                logger.error(f"Failed to send Telegram notification: {e2}")
+                # As a last resort, try sending a simplified message
+                try:
+                    simple_text = text.replace('*', '').replace('_', '').replace('`', '')
+                    await self.bot.send_message(chat_id=self.chat_id, text=simple_text)
+                except Exception as e3:
+                    logger.error(f"Failed to send even simplified message: {e3}") 

@@ -96,6 +96,7 @@ from app.telegram.orderblock_commands import (
 from app.services.ai_config import ai_config
 from app.services.signal_service import signal_service
 from cryptography.fernet import Fernet
+from app.services.order_block_strategy import order_block_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -401,37 +402,96 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
+        "🎮 **BOT COMMANDS**\n\n"
+        "**Basic Commands:**\n"
         "/start - Start the bot\n"
+        "/help - Show this help message\n"
+        "/menu - Show main menu\n\n"
+        "**Market Analysis:**\n"
+        "/signals - Show trading signals\n"
+        "/market <pair> - Show market overview\n"
+        "/analyze <pair> - Analyze specific pair (e.g. /analyze EURUSD)\n"
+        "/signal <pair> - Get trading signal for pair\n"
+        "/risk <pair> <risk%> <sl_pips> - Risk calculator\n"
+        "/pipcalc <pair> <lot> - Calculate pip value\n\n"
+        "**MT5 Trading:**\n"
         "/connect - Connect your MT5 account\n"
         "/disconnect - Disconnect your MT5 account\n"
-        "/analyze <pair> - Analyze a specific pair (e.g. /analyze EURUSD or /analyze XAUUSD)\n"
-        "/signal <pair> - Get a trading signal for a pair (e.g. /signal EURUSD)\n"
-        "/buy <pair> <lot> <price or 'market'> [sl] - Place a buy order (e.g. /buy EURUSD 0.1 market 50)\n"
-        "/sell <pair> <lot> <price or 'market'> [sl] - Place a sell order (e.g. /sell EURUSD 0.1 market 50)\n"
+        "/status - Check MT5 connection\n"
+        "/balance - Show account balance\n"
+        "/account - Show account info\n"
+        "/buy <pair> <lot> [price] [sl] - Place buy order\n"
+        "/sell <pair> <lot> [price] [sl] - Place sell order\n"
         "/positions - Show open positions\n"
-        "/orders - Show open orders\n"
-        "/history - Show recent trade history\n"
-        "/help - Show this help message"
+        "/orders - Show pending orders\n"
+        "/close <ticket> - Close specific position\n"
+        "/closeall - Close all positions\n"
+        "/modify <ticket> - Modify SL/TP\n"
+        "/cancel <ticket> - Cancel pending order\n"
+        "/price <pair> - Get current price\n"
+        "/summary - Trading summary\n\n"
+        "**Trade History:**\n"
+        "/trades - Show recent trades\n"
+        "/history [pair] - Show detailed trade history\n\n"
+        "**Strategies:**\n"
+        "/strategies - Learn about strategies\n"
+        "/orderblock - OrderBlock strategy info\n"
+        "/orderblock_status - OrderBlock status\n"
+        "/orderblock_signals - OrderBlock signals\n"
+        "/orderblock_performance - OrderBlock performance\n"
+        "/orderblock_settings - OrderBlock settings\n"
+        "/scan_orderblocks - Scan for OrderBlocks\n\n"
+        "**AI Trading:**\n"
+        "/ai_start - Start AI trading bot\n"
+        "/ai_stop - Stop AI trading bot\n"
+        "/ai_status - Get AI trading status\n"
+        "/ai_config - Configure AI settings\n\n"
+        "**Other:**\n"
+        "/cancel - Cancel current operation"
     )
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loading_msg = await update.message.reply_text("🔍 Fetching latest signals...")
     try:
         data = await safe_api_call_with_retry("/api/signals")
-        if not data:
-            await loading_msg.edit_text("😕 Could not fetch signals. The API server may be unavailable. Please try again later.")
+        # Handle API error
+        if not data or (isinstance(data, dict) and data.get("error")):
+            msg = data.get("error") if isinstance(data, dict) else "Could not fetch signals. The API server may be unavailable. Please try again later."
+            await loading_msg.edit_text(f"😕 {msg}")
             return
-        response = "📊 **Latest Forex Signals**\n\n"
-        for signal in data:
-            response += f"**{signal['pair']}** - {signal['strategy']}\n"
-            response += f"Entry: `{signal['entry_range']}`\n"
-            response += f"SL: `{signal['stop_loss']}` | TP: `{signal['take_profit']}`\n"
-            response += f"Confidence: {signal['confidence']} | R:R {signal['risk_reward_ratio']}\n\n"
+        # If warning present (rate limit), show warning and then signals
+        warning = None
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and data[0].get("warning"):
+            warning = data[0]["warning"]
+            data = data[1:]
+        # If no valid signals
+        if not isinstance(data, list) or len(data) == 0:
+            msg = warning if warning else "No valid signals at this time.\n\n⚠️ Risk Warning: This is not financial advice. Always do your own analysis."
+            await loading_msg.edit_text(msg, parse_mode='Markdown')
+            return
+        # If all signals are empty or malformed (e.g., all fields N/A)
+        valid_signals = [s for s in data if s.get('pair') and s.get('entry_range') and s.get('stop_loss') and s.get('take_profit')]
+        if not valid_signals:
+            msg = warning if warning else "No valid signals at this time.\n\n⚠️ Risk Warning: This is not financial advice. Always do your own analysis."
+            await loading_msg.edit_text(msg, parse_mode='Markdown')
+            return
+        response = ""
+        if warning:
+            response += f"⚠️ {warning}\n\n"
+        response += "📊 **Latest Forex Signals**\n\n"
+        for signal in valid_signals:
+            try:
+                response += f"**{signal.get('pair', 'N/A')}** - {signal.get('strategy', 'N/A')}\n"
+                response += f"Entry: `{signal.get('entry_range', 'N/A')}`\n"
+                response += f"SL: `{signal.get('stop_loss', 'N/A')}` | TP: `{signal.get('take_profit', 'N/A')}`\n"
+                response += f"Confidence: {signal.get('confidence', 'N/A')} | R:R {signal.get('risk_reward_ratio', 'N/A')}\n\n"
+            except Exception as e:
+                logger.error(f"Malformed signal data: {signal} - {e}")
         response += "⚠️ **Risk Warning:** This is not financial advice. Always do your own analysis."
         await loading_msg.edit_text(response, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Error in signals command: {e}")
+        logger.error(f"Error in /signals command: {e}", exc_info=True)
         await loading_msg.edit_text("😕 An error occurred while fetching signals. Please try again later.")
 
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -591,6 +651,112 @@ async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in trades command: {e}")
         await loading_msg.edit_text("😕 An error occurred while fetching trades. Please try again later.")
 
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show detailed trade history with filtering options."""
+    loading_msg = await update.message.reply_text("📋 Fetching detailed trade history...")
+    try:
+        # Get optional filter parameters
+        pair_filter = context.args[0].upper() if context.args else None
+        
+        data = await safe_api_call_with_retry("/api/trades")
+        if not data:
+            await loading_msg.edit_text("😕 Could not fetch trade history. The API server may be unavailable. Please try again later.")
+            return
+        
+        # Filter by pair if specified
+        if pair_filter:
+            data = [trade for trade in data if trade.get('symbol', '').upper() == pair_filter]
+            if not data:
+                await loading_msg.edit_text(f"📊 No trade history found for {pair_filter}")
+                return
+        
+        response = f"📊 **Trade History{f' for {pair_filter}' if pair_filter else ''}**\n\n"
+        
+        # Group by status
+        closed_trades = [t for t in data if t['status'] == 'closed']
+        open_trades = [t for t in data if t['status'] == 'open']
+        
+        if closed_trades:
+            response += f"✅ **Closed Trades ({len(closed_trades)})**\n"
+            total_pnl = 0
+            for trade in closed_trades[-5:]:  # Show last 5 closed trades
+                pnl = trade.get('pnl', 0) or 0
+                total_pnl += pnl
+                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                response += f"{pnl_emoji} {trade['symbol']} | ${pnl:.2f} | {trade['order_type'].upper()}\n"
+            response += f"**Total P&L: ${total_pnl:.2f}**\n\n"
+        
+        if open_trades:
+            response += f"⏳ **Open Trades ({len(open_trades)})**\n"
+            for trade in open_trades:
+                response += f"📈 {trade['symbol']} | Entry: {trade['entry_price']} | {trade['order_type'].upper()}\n"
+        
+        if not closed_trades and not open_trades:
+            response += "No trades found."
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in history command: {e}")
+        await loading_msg.edit_text("😕 An error occurred while fetching trade history. Please try again later.")
+
+async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Calculate pip value for a given pair and trade size."""
+    if len(context.args) != 2:
+        help_text = (
+            "💡 **Pip Calculator Help:**\n\n"
+            "**Format:** `/pipcalc <pair> <trade_size>`\n"
+            "**Example:** `/pipcalc EURUSD 0.1`\n\n"
+            "**Examples:**\n"
+            "• `/pipcalc EURUSD 0.1` - Calculate pip value for 0.1 lot EURUSD\n"
+            "• `/pipcalc GBPJPY 1.0` - Calculate pip value for 1.0 lot GBPJPY\n"
+            "• `/pipcalc XAUUSD 0.5` - Calculate pip value for 0.5 lot Gold\n\n"
+            "💡 *Trade size is in lots (0.01 = 1 micro lot, 0.1 = 1 mini lot, 1.0 = 1 standard lot)*"
+        )
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+        return
+    
+    pair, trade_size_str = context.args[0].upper(), context.args[1]
+    
+    try:
+        trade_size = float(trade_size_str)
+    except ValueError:
+        await update.message.reply_text("❌ Invalid trade size. Please use a valid number.")
+        return
+    
+    if trade_size <= 0:
+        await update.message.reply_text("❌ Trade size must be greater than 0.")
+        return
+    
+    loading_msg = await update.message.reply_text("🔄 Calculating pip value...")
+    
+    try:
+        data = await api_service.make_api_call(f"/api/pipcalc/{pair}/{trade_size}")
+        if not data or "error" in data:
+            error_msg = data.get("error", "😕 Calculation failed. Please check your inputs or try again.")
+            await loading_msg.edit_text(f"❌ {error_msg}")
+            return
+        
+        pip_value = data.get("pip_value_usd", 0)
+        
+        response = (
+            f"💱 **Pip Calculator**\n\n"
+            f"**Pair:** {data['pair']}\n"
+            f"**Trade Size:** {data['trade_size']} lots\n"
+            f"**Pip Value:** `${pip_value:.2f} USD`\n\n"
+            f"💡 *This is the USD value of 1 pip movement*\n"
+            f"📊 *For {trade_size} lots of {pair}*"
+        )
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        error_msg = "❌ Could not calculate pip value. Please try again later."
+        if "timeout" in str(e).lower():
+            error_msg = "⚠️ Calculation timeout - please try again"
+        elif "404" in str(e):
+            error_msg = "❌ Currency pair not supported"
+        await loading_msg.edit_text(error_msg)
+
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available trading strategies."""
     strategies_text = '''📊 **TRADING STRATEGIES**
@@ -614,8 +780,6 @@ async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def orderblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed Order Block + RSI + Fibonacci strategy information."""
-    from app.services.order_block_strategy import order_block_strategy
-    
     strategy_info = order_block_strategy.get_strategy_info()
     
     orderblock_text = f'''🎯 **Order Block + RSI + Fibonacci Strategy**
@@ -1085,7 +1249,8 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_data = {
             "symbol": pair,
             "lot": lot,
-            "type": "buy"
+            "type": "buy",
+            "user_id": user_id
         }
         if price is not None:
             order_data["price"] = price
@@ -1207,7 +1372,8 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_data = {
             "symbol": pair,
             "lot": lot,
-            "type": "sell"
+            "type": "sell",
+            "user_id": user_id
         }
         if price is not None:
             order_data["price"] = price
@@ -1271,43 +1437,58 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text("❌ **Error:** Could not fetch positions. Please try again.")
 
 async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show pending orders"""
+    """Show both pending orders and active trades"""
     user_id = update.effective_user.id
     
     # Try to auto-connect if not connected
     await ensure_mt5_connected(user_id)
     
-    loading_msg = await update.message.reply_text("⏳ Fetching pending orders...")
+    loading_msg = await update.message.reply_text("⏳ Fetching orders and positions...")
     
     try:
         logger.info("Calling /api/mt5/orders endpoint")
-        data = await api_service.make_api_call("/api/mt5/orders")
-        logger.info(f"Orders API response: {data}")
+        orders = await api_service.make_api_call("/api/mt5/orders")
+        logger.info(f"Orders API response: {orders}")
+        logger.info("Calling /api/mt5/positions endpoint")
+        positions = await api_service.make_api_call("/api/mt5/positions")
+        logger.info(f"Positions API response: {positions}")
         
-        if data is None:
-            await loading_msg.edit_text("❌ **API Error:** Could not connect to the server. Please try again.")
-            return
-        
-        # Check if data contains an error
-        if isinstance(data, dict) and "error" in data:
-            error_msg = data["error"]
-            if "not connected" in error_msg.lower():
+        # Error handling for API
+        if (orders is None or isinstance(orders, dict) and "error" in orders) and (positions is None or isinstance(positions, dict) and "error" in positions):
+            error_msg = orders.get("error") if isinstance(orders, dict) and "error" in orders else positions.get("error")
+            if error_msg and "not connected" in error_msg.lower():
                 await loading_msg.edit_text("❌ **MT5 Not Connected**\n\nPlease use `/connect` to connect to your MT5 account first.")
             else:
-                await loading_msg.edit_text(f"❌ **Error:** {error_msg}")
+                await loading_msg.edit_text(f"❌ **Error:** {error_msg or 'Could not connect to the server. Please try again.'}")
             return
         
-        if data and len(data) > 0:
-            response = "⏳ **Pending Orders**\n\n"
-            for order in data:
+        response = ""
+        # Pending Orders Section
+        if orders and isinstance(orders, list) and len(orders) > 0:
+            response += "⏳ **Pending Orders**\n\n"
+            for order in orders:
                 response += (
                     f"📋 **{order['symbol']}** ({order['type'].upper()})\n"
                     f"**Ticket:** {order['ticket']} | **Lot:** {order['lot']}\n"
                     f"**Price:** {order['price']}\n\n"
                 )
         else:
-            response = "⏳ **No Pending Orders**\n\nNo pending orders at the moment."
-        
+            response += "⏳ **No Pending Orders**\n\n"
+        # Active Trades Section
+        if positions and isinstance(positions, list) and len(positions) > 0:
+            response += "🟢 **Active Trades**\n\n"
+            for pos in positions:
+                response += (
+                    f"📈 **{pos['symbol']}** ({pos['type'].upper()})\n"
+                    f"**Ticket:** {pos['ticket']} | **Lot:** {pos['lot']}\n"
+                    f"**Entry:** {pos.get('price_open', pos.get('price', 'N/A'))} | **Current:** {pos.get('price_current', 'N/A')}\n"
+                    f"**Profit:** {pos.get('profit', 0):.2f}\n\n"
+                )
+        else:
+            response += "🟢 **No Active Trades**\n\n"
+        # If both are empty
+        if (not orders or (isinstance(orders, list) and len(orders) == 0)) and (not positions or (isinstance(positions, list) and len(positions) == 0)):
+            response = "⏳ **No Pending Orders or Active Trades**\n\nNo pending orders or open positions at the moment."
         await loading_msg.edit_text(response, parse_mode='Markdown')
         
     except Exception as e:
@@ -1365,6 +1546,8 @@ async def closeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get current price for symbol"""
+    from app.services.ai_config import ai_config
+    allowed_symbols = [p.upper() for p in ai_config.SYMBOLS]
     if not context.args:
         help_text = (
             "💰 **Price Check Help:**\n\n"
@@ -1372,36 +1555,32 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "**Examples:**\n"
             "• `/price EURUSD`\n"
             "• `/price GBPUSD`\n\n"
-            "💡 *Use /symbols to see available symbols*"
+            "💡 *Allowed: " + ', '.join(allowed_symbols) + "*"
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
         return
-    
     symbol = context.args[0].upper()
+    if symbol == "GOLD":
+        symbol = "XAUUSD"
+    if symbol not in allowed_symbols:
+        await update.message.reply_text(f"❌ {symbol} is not supported. Allowed: {', '.join(allowed_symbols)}")
+        return
     loading_msg = await update.message.reply_text(f"💰 Fetching price for {symbol}...")
-    
     endpoint = f"/api/mt5/price/{symbol}"
     logger.info(f"Calling price endpoint: {api_service.base_url}{endpoint}")
-
     try:
         data = await api_service.make_api_call(endpoint)
-        
-        if data:
-            if "error" in data:
-                logger.error(f"API returned an error for /price: {data['error']}")
-                await loading_msg.edit_text(f"❌ Error: {data['error']}")
-            else:
-                response = (
-                    f"💰 **{symbol} Current Price**\n\n"
-                    f"**Bid:** {data.get('bid', 'N/A')}\n"
-                    f"**Ask:** {data.get('ask', 'N/A')}\n"
-                    f"**Spread:** {data.get('spread', 'N/A')} pips"
-                )
-                await loading_msg.edit_text(response, parse_mode='Markdown')
-        else:
-            response = f"❌ Could not fetch price for {symbol}. The API server might be down or the symbol is invalid."
-            await loading_msg.edit_text(response, parse_mode='Markdown')
-        
+        if not data or (isinstance(data, dict) and data.get("error")):
+            msg = data.get("error") if isinstance(data, dict) else f"Could not fetch price for {symbol}. The API server might be down or the symbol is invalid."
+            await loading_msg.edit_text(f"❌ {msg}")
+            return
+        response = (
+            f"💰 **{symbol} Current Price**\n\n"
+            f"**Bid:** {data.get('bid', 'N/A')}\n"
+            f"**Ask:** {data.get('ask', 'N/A')}\n"
+            f"**Spread:** {data.get('spread', 'N/A')} pips"
+        )
+        await loading_msg.edit_text(response, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Exception in /price command for symbol {symbol}: {e}", exc_info=True)
         await loading_msg.edit_text("❌ An unexpected error occurred while fetching the price. Please check the logs.")
@@ -1409,25 +1588,23 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Trading summary"""
     loading_msg = await update.message.reply_text("📊 Generating trading summary...")
-    
     try:
         data = await api_service.make_api_call("/api/mt5/summary")
-        
-        if data:
-            response = (
-                f"📊 **Trading Summary**\n\n"
-                f"**Total P&L:** ${data.get('total_pnl', 0):,.2f}\n"
-                f"**Open Positions:** {data.get('open_positions', 0)}\n"
-                f"**Pending Orders:** {data.get('pending_orders', 0)}\n"
-                f"**Balance:** ${data.get('balance', 0):,.2f}\n"
-                f"**Equity:** ${data.get('equity', 0):,.2f}"
-            )
-        else:
-            response = "❌ Could not fetch trading summary."
-        
+        if not data or (isinstance(data, dict) and data.get("error")):
+            msg = data.get("error") if isinstance(data, dict) else "Could not fetch trading summary."
+            await loading_msg.edit_text(f"❌ {msg}")
+            return
+        response = (
+            f"📊 **Trading Summary**\n\n"
+            f"**Total P&L:** ${data.get('total_pnl', 0):,.2f}\n"
+            f"**Open Positions:** {data.get('open_positions', 0)}\n"
+            f"**Pending Orders:** {data.get('pending_orders', 0)}\n"
+            f"**Balance:** ${data.get('balance', 0):,.2f}\n"
+            f"**Equity:** ${data.get('equity', 0):,.2f}"
+        )
         await loading_msg.edit_text(response, parse_mode='Markdown')
-        
     except Exception as e:
+        logger.error(f"Error in /summary command: {e}", exc_info=True)
         await loading_msg.edit_text("❌ Error fetching summary. Please try again.")
 
 async def modify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1887,9 +2064,11 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('menu', menu_command))
     app.add_handler(CommandHandler('signals', signals))
     app.add_handler(CommandHandler('market', market))
-    app.add_handler(CommandHandler('analysis', analyze))
+    app.add_handler(CommandHandler('analyze', analyze))
     app.add_handler(CommandHandler('risk', risk))
     app.add_handler(CommandHandler('trades', trades))
+    app.add_handler(CommandHandler('history', history))
+    app.add_handler(CommandHandler('pipcalc', pipcalc))
     app.add_handler(CommandHandler('strategies', strategies))
     # MT5 Trading Commands
     app.add_handler(CommandHandler('connect', connect))
@@ -1924,6 +2103,7 @@ def setup_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(ai_config_callback, pattern='^ai_toggle:'))
     app.add_handler(CommandHandler("signal", signal))
     app.add_handler(CommandHandler("disconnect", disconnect))
+    app.add_handler(CommandHandler("analyze_all", analyze_all))
 
 async def run_network_diagnostics():
     """Run comprehensive network diagnostics."""
@@ -2098,7 +2278,18 @@ if __name__ == "__main__":
 async def set_bot_commands(application):
     await application.bot.set_my_commands([
         ("start", "Initialize bot"),
+        ("help", "Show this command list"),
+        ("menu", "Show main menu"),
+        ("signals", "Show trading signals"),
+        ("market", "Show market overview"),
+        ("analyze", "Analyze specific currency pair"),
+        ("risk", "Show risk management info"),
+        ("trades", "Show recent trades"),
+        ("history", "Show detailed trade history"),
+        ("pipcalc", "Calculate pip value"),
+        ("strategies", "Learn about our strategies"),
         ("connect", "Connect to MT5 (prompts for login details)"),
+        ("disconnect", "Disconnect from MT5"),
         ("status", "Check MT5 connection"),
         ("balance", "Show account balance"),
         ("account", "Show account info"),
@@ -2112,29 +2303,45 @@ async def set_bot_commands(application):
         ("cancel", "Cancel pending order"),
         ("price", "Get current price"),
         ("summary", "Trading summary"),
-        ("strategies", "Learn about our strategies"),
-        ("help", "Show this command list"),
+        ("signal", "Get trading signal for specific pair"),
+        ("orderblock", "OrderBlock strategy info"),
+        ("orderblock_status", "OrderBlock status"),
+        ("orderblock_signals", "OrderBlock signals"),
+        ("orderblock_performance", "OrderBlock performance"),
+        ("orderblock_settings", "OrderBlock settings"),
+        ("scan_orderblocks", "Scan for OrderBlocks"),
         ("ai_start", "Start the AI trading bot"),
         ("ai_stop", "Stop the AI trading bot"),
         ("ai_status", "Get AI trading status"),
-        ("ai_config", "Configure AI settings")
+        ("ai_config", "Configure AI settings"),
+        ("analyze_all", "Analyze all trading pairs")
     ])
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Return a trading signal for a specified pair."""
     from app.services.ai_config import ai_config
-    allowed_pairs = ai_config.SYMBOLS
+    allowed_pairs = [p.upper() for p in ai_config.SYMBOLS]
     if not context.args:
         await update.message.reply_text(f"Please specify a pair. Example: /signal EURUSD\nAllowed: {', '.join(allowed_pairs)}")
         return
     pair = context.args[0].upper()
+    if pair == "GOLD":
+        pair = "XAUUSD"
     if pair not in allowed_pairs:
         await update.message.reply_text(f"❌ {pair} is not supported. Allowed: {', '.join(allowed_pairs)}")
         return
     try:
         signal_data = await signal_service.get_signal_for_pair(pair)
-        if not signal_data or isinstance(signal_data, str):
-            await update.message.reply_text(f"❌ No signal available for {pair} at this time.")
+        # Handle warning or error
+        if isinstance(signal_data, dict) and signal_data.get("warning"):
+            await update.message.reply_text(f"⚠️ {signal_data['warning']}")
+            return
+        if not signal_data or (isinstance(signal_data, dict) and signal_data.get("error")):
+            msg = signal_data.get("error") if isinstance(signal_data, dict) else f"No signal available for {pair} at this time."
+            await update.message.reply_text(f"❌ {msg}")
+            return
+        if isinstance(signal_data, str):
+            await update.message.reply_text(f"❌ {signal_data}")
             return
         text = (
             f"📡 **Signal for {pair}**\n"
@@ -2147,6 +2354,7 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(text, parse_mode='Markdown')
     except Exception as e:
+        logger.error(f"Error in /signal command for {pair}: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error fetching signal for {pair}: {e}")
 
 ALLOWED_PAIRS = ["GBPUSD", "EURUSD", "GBPJPY", "NZDUSD", "AUDCAD", "GOLD", "XAUUSD"]
@@ -2251,3 +2459,53 @@ async def ensure_mt5_connected(user_id):
 CREDENTIAL_KEY = os.getenv('CREDENTIAL_KEY', Fernet.generate_key())
 CREDENTIAL_DB = os.getenv('CREDENTIAL_DB', 'mt5_credentials.db')
 credential_manager = CredentialManager(CREDENTIAL_DB, CREDENTIAL_KEY)
+
+async def analyze_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analyze all predefined trading pairs and return a summary for each."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    pairs = signal_service.pairs_to_scan
+    results = []
+    await context.bot.send_message(chat_id, "🔎 Analyzing all pairs. This may take a few moments...")
+    for i, pair in enumerate(pairs):
+        try:
+            df = await signal_service.fetch_ohlcv(pair, interval='60min', outputsize='compact')
+            if df is None or len(df) < 50:
+                results.append(f"*{pair}*: _Not enough data or unavailable._")
+                continue
+            # Technical summary: trend, support/resistance (simple trend: last close vs. 20-period MA)
+            close = df['close']
+            ma20 = close.rolling(20).mean()
+            trend = "Bullish" if close.iloc[-1] > ma20.iloc[-1] else ("Bearish" if close.iloc[-1] < ma20.iloc[-1] else "Neutral")
+            support = df['low'].tail(20).min()
+            resistance = df['high'].tail(20).max()
+            # Indicator signals
+            rsi = df['close'].rolling(14).apply(lambda x: calculate_rsi(x).iloc[-1])
+            last_rsi = rsi.iloc[-1] if not rsi.isna().iloc[-1] else None
+            macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
+            macd_signal = macd.ewm(span=9).mean()
+            macd_signal_str = "Bullish" if macd.iloc[-1] > macd_signal.iloc[-1] else ("Bearish" if macd.iloc[-1] < macd_signal.iloc[-1] else "Neutral")
+            # Order block strategy bias
+            ob_signal = order_block_strategy.analyze_pair(df)
+            if ob_signal and ob_signal.get('signal') == 'buy':
+                bias = 'Bullish'
+            elif ob_signal and ob_signal.get('signal') == 'sell':
+                bias = 'Bearish'
+            else:
+                bias = trend
+            # Format summary
+            summary = f"*{pair}*\n" \
+                      f"Trend: {trend}\n" \
+                      f"Support: {support:.5f} | Resistance: {resistance:.5f}\n" \
+                      f"RSI: {last_rsi:.1f} | MACD: {macd_signal_str}\n" \
+                      f"Suggested Bias: *{bias}*\n"
+            results.append(summary)
+            await asyncio.sleep(1)  # Short delay to avoid flooding
+        except Exception as e:
+            results.append(f"*{pair}*: _Analysis error: {e}_")
+    # Combine results into batches if too long
+    batch_size = 5
+    for i in range(0, len(results), batch_size):
+        batch = results[i:i+batch_size]
+        text = '\n'.join(batch)
+        await context.bot.send_message(chat_id, text, parse_mode='Markdown')

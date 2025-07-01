@@ -23,9 +23,42 @@ class SignalService:
         self._last_signals_cache = None
         self._last_signals_time = 0
         self._lock = asyncio.Lock()  # For throttling and concurrency
+        self._pair_signal_cache = {}  # {pair: (signal, timestamp)}
 
     async def fetch_ohlcv(self, pair: str, interval: str = '60min', outputsize: str = 'compact') -> Optional[pd.DataFrame]:
         """Fetch historical OHLCV data for a forex pair from Alpha Vantage."""
+        if pair == 'XAUUSD':
+            # Use TIME_SERIES_DAILY for gold (XAUUSD)
+            params = {
+                "function": "TIME_SERIES_DAILY",
+                "symbol": "XAUUSD",
+                "outputsize": outputsize,
+                "apikey": self.alpha_vantage_api_key
+            }
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(self.base_url, params=params, timeout=10)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    time_series = data.get("Time Series (Daily)", {})
+                    if not time_series:
+                        logger.warning(f"No OHLCV data for {pair}")
+                        return None
+                    df = pd.DataFrame.from_dict(time_series, orient='index')
+                    df = df.rename(columns={
+                        '1. open': 'open',
+                        '2. high': 'high',
+                        '3. low': 'low',
+                        '4. close': 'close',
+                        '5. volume': 'volume'
+                    })
+                    df = df.astype(float)
+                    df = df.sort_index()  # Oldest first
+                    return df
+            except Exception as e:
+                logger.error(f"Error fetching OHLCV for {pair} from Alpha Vantage: {e}", exc_info=True)
+                return None
+        # Default FX logic
         from_symbol, to_symbol = pair[:3], pair[3:]
         params = {
             "function": "FX_INTRADAY",
@@ -92,7 +125,9 @@ class SignalService:
                     if str(e) == "rate_limited":
                         logger.warning("Alpha Vantage rate limit hit. Returning cached signals if available.")
                         if self._last_signals_cache:
-                            return self._last_signals_cache
+                            # Return cached signals with a warning
+                            warning = {"warning": "⚠️ Data provider rate limit hit. Showing last available signals."}
+                            return [warning] + self._last_signals_cache
                         else:
                             # Return a user-friendly error message
                             return [{"error": "⚠️ Signal generation is temporarily limited by our data provider. Please try again in a minute."}]
@@ -201,21 +236,28 @@ class SignalService:
             }
         }
 
-    async def get_signal_for_pair(self, pair):
+    async def get_signal_for_pair(self, pair: str) -> Optional[Dict]:
+        """Get a signal for a specific pair, with rate limit fallback to cached signal."""
+        cache_duration = 60  # seconds
+        now = time.time()
+        # Check per-pair cache first
+        cached = self._pair_signal_cache.get(pair)
+        if cached and now - cached[1] < cache_duration:
+            return cached[0]
         try:
-            # Try to get signal from Alpha Vantage
             signal = await self.analyze_pair_for_signal(pair)
-            return signal
+            if signal:
+                self._pair_signal_cache[pair] = (signal, now)
+                return signal
         except RuntimeError as e:
             if str(e) == "rate_limited":
-                # Return cached signal or user-friendly message
-                if self._last_signals_cache:
-                    for cached_signal in self._last_signals_cache:
-                        if cached_signal.get('pair') == pair:
-                            return f"Alpha Vantage rate limit reached. Showing cached signal: {cached_signal}"
-                return "Alpha Vantage rate limit reached. Please try again later."
-            return f"Error getting signal: {e}"
+                # Try to return cached signal for this pair
+                if cached and now - cached[1] < cache_duration:
+                    return {"warning": "\u26a0\ufe0f Data provider rate limit hit. Showing last available signal.", **cached[0]}
+                return {"error": "\u26a0\ufe0f Signal temporarily unavailable due to data provider rate limit. Please try again in a minute."}
         except Exception as e:
-            return f"Error getting signal: {e}"
+            logger.error(f"Error in get_signal_for_pair for {pair}: {e}", exc_info=True)
+            return {"error": f"Error fetching signal for {pair}: {e}"}
+        return {"error": f"No signal available for {pair} at this time."}
 
 signal_service = SignalService() 

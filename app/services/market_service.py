@@ -101,6 +101,23 @@ class MarketService:
             logger.error(f"Unexpected error fetching market data for {pair}: {e}", exc_info=True)
             return {"error": f"An unexpected error occurred while fetching market data for {pair}. Please try again later."}
 
+    async def get_pip_value_in_usd(self, pair: str, trade_size: float) -> float:
+        pair = pair.upper()
+        if pair == 'XAUUSD':
+            # Gold: 1 pip = 0.01, contract size = 100 oz, pip value = contract_size * pip_size * lots
+            pip_size = 0.01
+            contract_size = 100
+            pip_value = contract_size * pip_size * trade_size
+            return pip_value
+        elif pair.endswith('JPY'):
+            pip_size = 0.01
+            contract_size = 100000
+        else:
+            pip_size = 0.0001
+            contract_size = 100000
+        pip_value = contract_size * pip_size * trade_size
+        return pip_value
+
 # Create a single instance
 market_service = MarketService()
 
