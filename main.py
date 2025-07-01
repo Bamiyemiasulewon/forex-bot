@@ -25,12 +25,25 @@ from pydantic import BaseModel
 from telegram.ext import Application
 
 # Import our modules
-from app.telegram.bot import setup_handlers, start_telegram_bot, shutdown_bot, set_bot_commands
+from app.telegram.bot import setup_handlers, start_telegram_bot, shutdown_bot, set_bot_commands, get_application
 from app.services.api_service import api_service
 from app.services.signal_service import signal_service
 from app.services.market_service import market_service
 from app.services.mt5_service import MT5Service
 from app.services.database_service import get_db_dependency, get_or_create_user, Trade
+
+# Import MT5 for position type constants
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+    mt5 = None
+# AI Imports
+from app.services.ai_config import ai_config
+from app.services.ai_risk_manager import AIRiskManager
+from app.services.telegram_notifier import AITelegramNotifier
+from app.services.ai_trading_service import AITradingService
 
 # Enable tracemalloc for debugging memory leaks
 tracemalloc.start()
@@ -50,8 +63,15 @@ shutdown_event = asyncio.Event()
 # Initialize MT5 service
 mt5_service = MT5Service()
 
+# AI Service Initialization
+ai_risk_manager: Optional[AIRiskManager] = None
+ai_notifier: Optional[AITelegramNotifier] = None
+ai_trading_service: Optional[AITradingService] = None
+ai_bot_task: Optional[asyncio.Task] = None
+
 # Telegram configuration
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "default_chat_id") # IMPORTANT: User must set this
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
@@ -78,10 +98,30 @@ class MT5Order(BaseModel):
     sl: float = None
     tp: float = None
 
+async def _ai_supervisor(service: AITradingService):
+    """Monitors the AI trading task and restarts it if it fails."""
+    while True:
+        try:
+            # This task will run forever until it's cancelled or it crashes
+            await service.start()
+            
+            # If start() returns (which it shouldn't unless it's stopped), wait before restarting
+            logger.warning("AI service's main loop exited unexpectedly. Restarting in 60 seconds...")
+            await asyncio.sleep(60)
+
+        except asyncio.CancelledError:
+            logger.info("AI supervisor task was cancelled. Shutting down.")
+            break
+        except Exception as e:
+            logger.error(f"AI supervisor caught an exception: {e}. Restarting AI service in 60 seconds.", exc_info=True)
+            # Ensure the service is stopped before trying to restart
+            service.stop()
+            await asyncio.sleep(60)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown."""
-    global bot_task
+    global bot_task, ai_risk_manager, ai_notifier, ai_trading_service, ai_bot_task
     
     # Startup
     logger.info("🚀 Starting Forex Trading Bot...")
@@ -91,9 +131,26 @@ async def lifespan(app: FastAPI):
         logger.info("🤖 Starting Telegram bot...")
         bot_task = asyncio.create_task(start_telegram_bot(TELEGRAM_TOKEN, shutdown_event))
         
-        # Wait a moment for bot to initialize
+        # Wait a moment for bot to initialize and get the Application instance
         await asyncio.sleep(3)
-        
+
+        telegram_app = get_application()
+        # Initialize AI Services
+        if telegram_app:
+            logger.info("Initializing AI Services...")
+            ai_risk_manager = AIRiskManager(config=ai_config, mt5_service=mt5_service)
+            ai_notifier = AITelegramNotifier(bot=telegram_app.bot, chat_id=TELEGRAM_CHAT_ID)
+            ai_trading_service = AITradingService(
+                config=ai_config,
+                risk_manager=ai_risk_manager,
+                mt5_service=mt5_service,
+                notifier=ai_notifier
+            )
+            # Start the AI bot task under the supervisor
+            ai_bot_task = asyncio.create_task(_ai_supervisor(ai_trading_service))
+        else:
+            logger.error("Telegram App not initialized. AI services cannot start.")
+
         logger.info("✅ Application startup complete")
         yield
         
@@ -103,6 +160,13 @@ async def lifespan(app: FastAPI):
     finally:
         # Shutdown
         logger.info("🛑 Shutting down application...")
+        
+        # Stop AI bot
+        if ai_bot_task and not ai_bot_task.done():
+            logger.info("🛑 Stopping AI supervisor and trading service...")
+            ai_bot_task.cancel()
+        if ai_trading_service:
+            ai_trading_service.stop()
         
         # Stop the bot
         if bot_task and not bot_task.done():
@@ -153,11 +217,13 @@ async def health_check():
     """Health check endpoint."""
     bot_status = "running" if bot_task and not bot_task.done() else "stopped"
     mt5_status = "connected" if mt5_service.connected else "disconnected"
+    ai_status = "running" if ai_trading_service and ai_trading_service.is_running else "stopped"
     return {
         "status": "healthy", 
         "message": "API server is running",
         "bot_status": bot_status,
         "mt5_status": mt5_status,
+        "ai_status": ai_status,
         "timestamp": time.time()
     }
 
@@ -347,6 +413,7 @@ async def calculate_pip_value(pair: str, trade_size: float):
 @app.post("/api/mt5/connect")
 async def mt5_connect(credentials: dict):
     """Connect to MT5 using real service."""
+    global ai_risk_manager, ai_notifier, ai_trading_service, ai_bot_task
     try:
         # Handle both dict and Pydantic model inputs
         if hasattr(credentials, 'login'):
@@ -359,12 +426,30 @@ async def mt5_connect(credentials: dict):
             login = credentials.get("login")
             password = credentials.get("password")
             server = credentials.get("server")
-        
         if not all([login, password, server]):
             return {"success": False, "error": "Missing credentials"}
-        
         result = await mt5_service.connect(login, password, server)
         logger.info(f"MT5 connection attempt for login: {login}, result: {result}")
+        # If connection is successful, start AI services if not already running
+        if result.get("success") and mt5_service.connected:
+            telegram_app = get_application()
+            if telegram_app:
+                if not ai_trading_service:
+                    logger.info("Initializing AI Services after MT5 connect...")
+                    ai_risk_manager = AIRiskManager(config=ai_config, mt5_service=mt5_service)
+                    ai_notifier = AITelegramNotifier(bot=telegram_app.bot, chat_id=TELEGRAM_CHAT_ID)
+                    ai_trading_service = AITradingService(
+                        config=ai_config,
+                        risk_manager=ai_risk_manager,
+                        mt5_service=mt5_service,
+                        notifier=ai_notifier
+                    )
+                # Only start the AI bot task if not already running
+                if not ai_bot_task or ai_bot_task.done():
+                    ai_bot_task = asyncio.create_task(_ai_supervisor(ai_trading_service))
+                    logger.info("AI trading service started after MT5 connect.")
+            else:
+                logger.error("Telegram App not initialized. AI services cannot start.")
         # Return the full result, including error details, to the user
         return result
     except Exception as e:
@@ -430,21 +515,65 @@ async def mt5_order(order_data: dict):
 async def mt5_positions():
     """Get real open positions from MT5."""
     try:
-        result = await mt5_service.get_positions()
-        return result
+        if not MT5_AVAILABLE:
+            return {"error": "MetaTrader5 package not available"}
+        
+        if not mt5_service.connected:
+            return {"error": "MT5 not connected"}
+        
+        positions = await mt5_service.get_positions()
+        if positions is None:
+            return []
+        
+        # Convert MT5 position objects to dictionaries
+        positions_list = []
+        for pos in positions:
+            try:
+                position_dict = {
+                    "ticket": pos.ticket,
+                    "symbol": pos.symbol,
+                    "type": "buy" if pos.type == mt5.POSITION_TYPE_BUY else "sell",
+                    "lot": pos.volume,
+                    "price_open": pos.price_open,
+                    "price_current": pos.price_current,
+                    "profit": pos.profit,
+                    "sl": pos.sl,
+                    "tp": pos.tp,
+                    "time": pos.time
+                }
+                positions_list.append(position_dict)
+            except Exception as e:
+                logger.error(f"Error processing position: {e}")
+                continue
+        
+        return positions_list
     except Exception as e:
         logger.error(f"Error getting positions: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return {"error": f"Failed to get positions: {str(e)}"}
 
 @app.get("/api/mt5/orders")
 async def mt5_orders():
     """Get real pending orders from MT5."""
     try:
-        result = await mt5_service.get_orders()
-        return result
+        if not MT5_AVAILABLE:
+            return {"error": "MetaTrader5 package not available"}
+        
+        if not mt5_service.connected:
+            return {"error": "MT5 not connected"}
+        
+        orders = await mt5_service.get_orders()
+        if orders is None:
+            return []
+        
+        # Ensure orders is a list
+        if not isinstance(orders, list):
+            logger.error(f"Expected list of orders, got: {type(orders)}")
+            return []
+        
+        return orders
     except Exception as e:
         logger.error(f"Error getting orders: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return {"error": f"Failed to get orders: {str(e)}"}
 
 @app.post("/api/mt5/close/{ticket}")
 async def mt5_close_position(ticket: int):
@@ -510,6 +639,32 @@ async def mt5_modify_position(modification: dict):
     except Exception as e:
         logger.error(f"Error modifying MT5 position: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+
+# --- AI Control Endpoints ---
+@app.post("/api/ai/start")
+async def ai_start():
+    if ai_trading_service:
+        await ai_trading_service.start()
+        return {"status": "success", "message": "AI trading service started."}
+    return {"status": "error", "message": "AI service not initialized."}
+
+@app.post("/api/ai/stop")
+async def ai_stop():
+    if ai_trading_service:
+        ai_trading_service.stop()
+        return {"status": "success", "message": "AI trading service stopped."}
+    return {"status": "error", "message": "AI service not initialized."}
+
+@app.get("/api/ai/status")
+async def ai_status():
+    if ai_trading_service:
+        return {
+            "is_running": ai_trading_service.is_running,
+            "daily_trades": ai_risk_manager.daily_trade_count,
+            "max_daily_trades": ai_config.MAX_DAILY_TRADES,
+            "daily_pnl": ai_risk_manager.daily_pnl
+        }
+    return {"is_running": False, "message": "AI service not initialized."}
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):

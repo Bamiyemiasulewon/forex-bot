@@ -94,7 +94,8 @@ class SignalService:
                         if self._last_signals_cache:
                             return self._last_signals_cache
                         else:
-                            raise
+                            # Return a user-friendly error message
+                            return [{"error": "⚠️ Signal generation is temporarily limited by our data provider. Please try again in a minute."}]
                 except Exception as e:
                     logger.error(f"Error generating signal for {pair}: {e}", exc_info=True)
             if signals:
@@ -199,5 +200,22 @@ class SignalService:
                 "risk_reward": "1:2"
             }
         }
+
+    async def get_signal_for_pair(self, pair):
+        try:
+            # Try to get signal from Alpha Vantage
+            signal = await self.analyze_pair_for_signal(pair)
+            return signal
+        except RuntimeError as e:
+            if str(e) == "rate_limited":
+                # Return cached signal or user-friendly message
+                if self._last_signals_cache:
+                    for cached_signal in self._last_signals_cache:
+                        if cached_signal.get('pair') == pair:
+                            return f"Alpha Vantage rate limit reached. Showing cached signal: {cached_signal}"
+                return "Alpha Vantage rate limit reached. Please try again later."
+            return f"Error getting signal: {e}"
+        except Exception as e:
+            return f"Error getting signal: {e}"
 
 signal_service = SignalService() 

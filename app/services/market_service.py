@@ -13,7 +13,7 @@ SUPPORTED_FOREX_PAIRS = [
     'EURUSD', 'USDJPY', 'GBPUSD', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD',
     'EURJPY', 'GBPJPY', 'EURGBP', 'EURCHF', 'AUDJPY', 'CHFJPY', 'EURAUD',
     'EURCAD', 'GBPCAD', 'GBPAUD', 'AUDCAD', 'AUDNZD', 'NZDCAD', 'NZDJPY',
-    'CADJPY', 'CADCHF', 'AUDCHF', 'NZDCHF'
+    'CADJPY', 'CADCHF', 'AUDCHF', 'NZDCHF', 'XAUUSD'
 ]
 
 class MarketService:
@@ -51,7 +51,11 @@ class MarketService:
         cached_data = self._get_from_cache(cache_key)
         if cached_data:
             return cached_data
-        from_symbol, to_symbol = pair[:3], pair[3:]
+        # Special handling for Gold (XAUUSD)
+        if pair == "XAUUSD":
+            from_symbol, to_symbol = "XAU", "USD"
+        else:
+            from_symbol, to_symbol = pair[:3], pair[3:]
         params = {
             "function": "CURRENCY_EXCHANGE_RATE",
             "from_currency": from_symbol,

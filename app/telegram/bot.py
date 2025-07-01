@@ -7,6 +7,7 @@ import socket
 import time
 import tracemalloc
 import signal
+import traceback
 
 # Enable tracemalloc for debugging memory leaks
 tracemalloc.start()
@@ -92,11 +93,18 @@ from app.security.credential_manager import CredentialManager
 from app.telegram.orderblock_commands import (
     orderblock_command, orderblock_status_command, scan_orderblocks_command
 )
+from app.services.ai_config import ai_config
+from app.services.signal_service import signal_service
+from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
 
 # Global application instance for proper shutdown
 application = None
+
+def get_application():
+    """Returns the global application instance."""
+    return application
 
 # Global shutdown event
 shutdown_event = None
@@ -392,7 +400,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(menu_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(commands_message, parse_mode='Markdown')
+    help_text = (
+        "/start - Start the bot\n"
+        "/connect - Connect your MT5 account\n"
+        "/disconnect - Disconnect your MT5 account\n"
+        "/analyze <pair> - Analyze a specific pair (e.g. /analyze EURUSD or /analyze XAUUSD)\n"
+        "/signal <pair> - Get a trading signal for a pair (e.g. /signal EURUSD)\n"
+        "/buy <pair> <lot> <price or 'market'> [sl] - Place a buy order (e.g. /buy EURUSD 0.1 market 50)\n"
+        "/sell <pair> <lot> <price or 'market'> [sl] - Place a sell order (e.g. /sell EURUSD 0.1 market 50)\n"
+        "/positions - Show open positions\n"
+        "/orders - Show open orders\n"
+        "/history - Show recent trade history\n"
+        "/help - Show this help message"
+    )
+    await update.message.reply_text(help_text)
 
 async def signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loading_msg = await update.message.reply_text("🔍 Fetching latest signals...")
@@ -441,14 +462,35 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_msg = f"❌ Currency pair {pair} not supported"
         await loading_msg.edit_text(error_msg)
 
-async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analyze market data for a single allowed pair specified by the user."""
+    allowed_pairs = ["GBPUSD", "EURUSD", "GBPJPY", "NZDUSD", "AUDCAD", "XAUUSD"]  # Gold is XAUUSD
     if not context.args:
-        await update.message.reply_text("Please specify a currency pair. Example: `/analysis EURUSD`")
+        await update.message.reply_text("Please specify a pair. Example: /analyze GBPUSD\nAllowed: GBPUSD, EURUSD, GBPJPY, NZDUSD, AUDCAD, XAUUSD (Gold)")
         return
     pair = context.args[0].upper()
+    if pair not in allowed_pairs:
+        await update.message.reply_text(f"❌ {pair} is not supported. Allowed: {', '.join(allowed_pairs)}")
+        return
+    # Special handling for Gold (XAUUSD): only show price/basic info
+    if pair == "XAUUSD":
+        data = await api_service.make_api_call(f"/api/market/{pair}")
+        if not data or 'error' in data:
+            await update.message.reply_text(f"❌ {pair}: Market data unavailable.")
+            return
+        price = data.get('price', 0)
+        timestamp = data.get('timestamp', 'N/A')
+        await update.message.reply_text(
+            f"🪙 **Gold (XAUUSD) Market Info**\n\n"
+            f"Price: `{price:,.2f}`\n"
+            f"Timestamp: {timestamp}",
+            parse_mode='Markdown'
+        )
+        return
+    # For other pairs, do full analysis
     data = await api_service.make_api_call(f"/api/market/{pair}")
     if not data:
-        await update.message.reply_text(f"📉 Sorry, market data for **{pair}** is currently unavailable.")
+        await update.message.reply_text(f"❌ {pair}: Market data unavailable.")
         return
     price = data.get('price', 0)
     high = data.get('high', price)
@@ -467,16 +509,14 @@ async def analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trend = "🟡 NEUTRAL"
         trend_emoji = "➡️"
     analysis_text = (
-        f"📊 **Technical Analysis: {pair}**\n\n"
-        f"**Current Price:** `{price:,.5f}`\n"
-        f"**Daily Range:** `{daily_range:,.5f}`\n"
-        f"**Price Change:** `{price_change:,.5f}` ({price_change_pct:+.2f}%)\n"
-        f"**Trend:** {trend_emoji} {trend}\n\n"
-        f"**Support:** `{low:,.5f}`\n"
-        f"**Resistance:** `{high:,.5f}`\n\n"
-        f"💡 *This is a basic analysis. For advanced indicators, use our web platform.*"
+        f"**{pair}**\n"
+        f"Price: `{price:,.5f}`\n"
+        f"Range: `{daily_range:,.5f}`\n"
+        f"Change: `{price_change:,.5f}` ({price_change_pct:+.2f}%)\n"
+        f"Trend: {trend_emoji} {trend}\n"
+        f"Support: `{low:,.5f}` | Resistance: `{high:,.5f}`\n"
     )
-    await update.message.reply_text(analysis_text, parse_mode='Markdown')
+    await update.message.reply_text(f"📊 **Market Analysis**\n\n{analysis_text}", parse_mode='Markdown')
 
 async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 3:
@@ -816,38 +856,33 @@ async def scan_orderblocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error scanning for setups. Please try again later.")
 
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Multi-step MT5 connection process"""
+    """Multi-step MT5 connection process with credential storage"""
     user_id = update.effective_user.id
-    
     # Clean up expired sessions first
     session_manager.cleanup_expired_sessions()
-    
     # If user has arguments, use the old single-step method for backward compatibility
     if context.args and len(context.args) >= 3:
         login, password, server = context.args[0], context.args[1], context.args[2]
         loading_msg = await update.message.reply_text("🔗 Connecting to MT5...")
-        
         try:
             data = await api_service.make_api_call("/api/mt5/connect", method="POST", json={
                 "login": login,
                 "password": password,
                 "server": server
             })
-            
             if data is None:
                 await loading_msg.edit_text("❌ **Connection Failed:** API server is not running. Please start the server first.")
                 return
-            
             if data.get("success"):
+                # Store credentials securely
+                credential_manager.store_credentials(user_id, login, password, server)
                 await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
             else:
                 error_msg = data.get("error", "Connection failed. Please check your credentials.")
                 await loading_msg.edit_text(f"❌ **Connection Failed:** {error_msg}")
-                
         except Exception as e:
             await loading_msg.edit_text(f"❌ **Connection Failed:** {str(e)}")
         return
-    
     # Start multi-step process
     session_manager.create_session(user_id, "mt5_connect")
     await update.message.reply_text(
@@ -945,33 +980,275 @@ async def account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(f"❌ **Account Check Failed:** {str(e)}")
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Initiates a multi-step process to place a buy order."""
-    user_id = update.effective_user.id
-    session_manager.create_session(user_id, "buy_order")
-    
-    await update.message.reply_text(
-        "📈 **Buy Order Setup**\n\n"
-        "Please enter the symbol you want to buy (e.g., EURUSD, GBPJPY).",
-        parse_mode='Markdown'
-    )
+    try:
+        user_id = update.effective_user.id
+        args = context.args
+        # Parse and validate as before
+        if len(args) < 2:
+            example = f"/buy EURUSD 0.10"
+            example_limit = f"/buy GBPJPY 1.5 200.123"
+            example_sl = f"/buy EURUSD 0.10 1.23000"  # market order with SL
+            await update.message.reply_text(
+                f"Invalid command format.\n"
+                f"Examples:\n"
+                f"• {example}  (market order)\n"
+                f"• {example_limit}  (limit order)\n"
+                f"• {example_sl}  (market order with SL)\n"
+                f"Format: /buy PAIR LOTSIZE [PRICE] [SL]"
+            )
+            return
+        pair = args[0].upper()
+        if pair == "GOLD":
+            pair = "XAUUSD"
+        allowed_pairs = [p.upper() for p in ai_config.SYMBOLS]
+        if pair not in allowed_pairs:
+            allowed_str = ', '.join([p if p != "XAUUSD" else "GOLD" for p in allowed_pairs])
+            await update.message.reply_text(f"Invalid pair. Allowed: {allowed_str}")
+            return
+        try:
+            lot = float(args[1])
+        except Exception:
+            await update.message.reply_text("Invalid lot size format")
+            return
+        if lot < 0.01 or lot > 100:
+            await update.message.reply_text("Lot size must be between 0.01 and 100")
+            return
+        price = None
+        sl = None
+        # Detect price and optional SL
+        if len(args) >= 3:
+            try:
+                price = float(args[2])
+                # If there is a 4th argument, treat as SL
+                if len(args) == 4:
+                    sl = float(args[3])
+            except Exception:
+                # If only 3 args and 3rd is not a price, treat as SL for market order
+                if len(args) == 3:
+                    try:
+                        sl = float(args[2])
+                        price = None
+                    except Exception:
+                        await update.message.reply_text("Price/SL must be positive number")
+                        return
+                else:
+                    await update.message.reply_text("Price/SL must be positive number")
+                    return
+        # Validate price and SL decimal places
+        if price is not None:
+            if price <= 0:
+                await update.message.reply_text("Price must be positive number")
+                return
+            if pair == "XAUUSD":
+                if not (round(price, 2) == price):
+                    await update.message.reply_text("Price for GOLD must have up to 2 decimal places")
+                    return
+            elif pair.endswith("JPY"):
+                if not (round(price, 3) == price):
+                    await update.message.reply_text("Price for JPY pairs must have up to 3 decimal places")
+                    return
+            else:
+                if not (round(price, 5) == price):
+                    await update.message.reply_text(f"Price for {pair} must have up to 5 decimal places")
+                    return
+        if sl is not None:
+            if sl <= 0:
+                await update.message.reply_text("Stop loss must be positive number")
+                return
+            if pair == "XAUUSD":
+                if not (round(sl, 2) == sl):
+                    await update.message.reply_text("Stop loss for GOLD must have up to 2 decimal places")
+                    return
+            elif pair.endswith("JPY"):
+                if not (round(sl, 3) == sl):
+                    await update.message.reply_text("Stop loss for JPY pairs must have up to 3 decimal places")
+                    return
+            else:
+                if not (round(sl, 5) == sl):
+                    await update.message.reply_text(f"Stop loss for {pair} must have up to 5 decimal places")
+                    return
+        elif len(args) > 4:
+            example = f"/buy EURUSD 0.10"
+            example_limit = f"/buy GBPJPY 1.5 200.123"
+            example_sl = f"/buy EURUSD 0.10 1.23000"
+            await update.message.reply_text(
+                f"Invalid command format.\n"
+                f"Examples:\n"
+                f"• {example}  (market order)\n"
+                f"• {example_limit}  (limit order)\n"
+                f"• {example_sl}  (market order with SL)\n"
+                f"Format: /buy PAIR LOTSIZE [PRICE] [SL]"
+            )
+            return
+        # Actually place the order in MT5
+        await ensure_mt5_connected(user_id)
+        order_data = {
+            "symbol": pair,
+            "lot": lot,
+            "type": "buy"
+        }
+        if price is not None:
+            order_data["price"] = price
+        if sl is not None:
+            order_data["sl"] = sl
+        result = await api_service.make_api_call("/api/mt5/order", method="POST", json=order_data)
+        if result and result.get("success"):
+            await update.message.reply_text(f"✅ Buy order placed for {pair} ({lot} lots).")
+            await positions(update, context)
+        else:
+            await update.message.reply_text(f"❌ Failed to place buy order: {result.get('error', 'Unknown error')}")
+    except Exception as e:
+        print(traceback.format_exc())
+        await update.message.reply_text(f"❌ An error occurred: {e}")
 
 async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Initiates a multi-step process to place a sell order."""
-    user_id = update.effective_user.id
-    session_manager.create_session(user_id, "sell_order")
-    
-    await update.message.reply_text(
-        "📉 **Sell Order Setup**\n\n"
-        "Please enter the symbol you want to sell (e.g., EURUSD, GBPJPY).",
-        parse_mode='Markdown'
-    )
+    try:
+        user_id = update.effective_user.id
+        args = context.args
+        # Parse and validate as before
+        if len(args) < 2:
+            example = f"/sell EURUSD 0.10"
+            example_limit = f"/sell GBPJPY 1.5 200.123"
+            example_sl = f"/sell EURUSD 0.10 1.23000"
+            await update.message.reply_text(
+                f"Invalid command format.\n"
+                f"Examples:\n"
+                f"• {example}  (market order)\n"
+                f"• {example_limit}  (limit order)\n"
+                f"• {example_sl}  (market order with SL)\n"
+                f"Format: /sell PAIR LOTSIZE [PRICE] [SL]"
+            )
+            return
+        pair = args[0].upper()
+        if pair == "GOLD":
+            pair = "XAUUSD"
+        allowed_pairs = [p.upper() for p in ai_config.SYMBOLS]
+        if pair not in allowed_pairs:
+            allowed_str = ', '.join([p if p != "XAUUSD" else "GOLD" for p in allowed_pairs])
+            await update.message.reply_text(f"Invalid pair. Allowed: {allowed_str}")
+            return
+        try:
+            lot = float(args[1])
+        except Exception:
+            await update.message.reply_text("Invalid lot size format")
+            return
+        if lot < 0.01 or lot > 100:
+            await update.message.reply_text("Lot size must be between 0.01 and 100")
+            return
+        price = None
+        sl = None
+        # Detect price and optional SL
+        if len(args) >= 3:
+            try:
+                price = float(args[2])
+                # If there is a 4th argument, treat as SL
+                if len(args) == 4:
+                    sl = float(args[3])
+            except Exception:
+                # If only 3 args and 3rd is not a price, treat as SL for market order
+                if len(args) == 3:
+                    try:
+                        sl = float(args[2])
+                        price = None
+                    except Exception:
+                        await update.message.reply_text("Price/SL must be positive number")
+                        return
+                else:
+                    await update.message.reply_text("Price/SL must be positive number")
+                    return
+        # Validate price and SL decimal places
+        if price is not None:
+            if price <= 0:
+                await update.message.reply_text("Price must be positive number")
+                return
+            if pair == "XAUUSD":
+                if not (round(price, 2) == price):
+                    await update.message.reply_text("Price for GOLD must have up to 2 decimal places")
+                    return
+            elif pair.endswith("JPY"):
+                if not (round(price, 3) == price):
+                    await update.message.reply_text("Price for JPY pairs must have up to 3 decimal places")
+                    return
+            else:
+                if not (round(price, 5) == price):
+                    await update.message.reply_text(f"Price for {pair} must have up to 5 decimal places")
+                    return
+        if sl is not None:
+            if sl <= 0:
+                await update.message.reply_text("Stop loss must be positive number")
+                return
+            if pair == "XAUUSD":
+                if not (round(sl, 2) == sl):
+                    await update.message.reply_text("Stop loss for GOLD must have up to 2 decimal places")
+                    return
+            elif pair.endswith("JPY"):
+                if not (round(sl, 3) == sl):
+                    await update.message.reply_text("Stop loss for JPY pairs must have up to 3 decimal places")
+                    return
+            else:
+                if not (round(sl, 5) == sl):
+                    await update.message.reply_text(f"Stop loss for {pair} must have up to 5 decimal places")
+                    return
+        elif len(args) > 4:
+            example = f"/sell EURUSD 0.10"
+            example_limit = f"/sell GBPJPY 1.5 200.123"
+            example_sl = f"/sell EURUSD 0.10 1.23000"
+            await update.message.reply_text(
+                f"Invalid command format.\n"
+                f"Examples:\n"
+                f"• {example}  (market order)\n"
+                f"• {example_limit}  (limit order)\n"
+                f"• {example_sl}  (market order with SL)\n"
+                f"Format: /sell PAIR LOTSIZE [PRICE] [SL]"
+            )
+            return
+        # Actually place the order in MT5
+        await ensure_mt5_connected(user_id)
+        order_data = {
+            "symbol": pair,
+            "lot": lot,
+            "type": "sell"
+        }
+        if price is not None:
+            order_data["price"] = price
+        if sl is not None:
+            order_data["sl"] = sl
+        result = await api_service.make_api_call("/api/mt5/order", method="POST", json=order_data)
+        if result and result.get("success"):
+            await update.message.reply_text(f"✅ Sell order placed for {pair} ({lot} lots).")
+            await positions(update, context)
+        else:
+            await update.message.reply_text(f"❌ Failed to place sell order: {result.get('error', 'Unknown error')}")
+    except Exception as e:
+        print(traceback.format_exc())
+        await update.message.reply_text(f"❌ An error occurred: {e}")
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show open positions"""
+    user_id = update.effective_user.id
+    
+    # Try to auto-connect if not connected
+    await ensure_mt5_connected(user_id)
+    
     loading_msg = await update.message.reply_text("📊 Fetching open positions...")
     
     try:
+        logger.info("Calling /api/mt5/positions endpoint")
         data = await api_service.make_api_call("/api/mt5/positions")
+        logger.info(f"Positions API response: {data}")
+        
+        if data is None:
+            await loading_msg.edit_text("❌ **API Error:** Could not connect to the server. Please try again.")
+            return
+        
+        # Check if data contains an error
+        if isinstance(data, dict) and "error" in data:
+            error_msg = data["error"]
+            if "not connected" in error_msg.lower():
+                await loading_msg.edit_text("❌ **MT5 Not Connected**\n\nPlease use `/connect` to connect to your MT5 account first.")
+            else:
+                await loading_msg.edit_text(f"❌ **Error:** {error_msg}")
+            return
         
         if data and len(data) > 0:
             response = "📊 **Open Positions**\n\n"
@@ -990,14 +1267,35 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        await loading_msg.edit_text("❌ Error fetching positions. Please try again.")
+        logger.error(f"Error in positions command: {e}")
+        await loading_msg.edit_text("❌ **Error:** Could not fetch positions. Please try again.")
 
 async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show pending orders"""
+    user_id = update.effective_user.id
+    
+    # Try to auto-connect if not connected
+    await ensure_mt5_connected(user_id)
+    
     loading_msg = await update.message.reply_text("⏳ Fetching pending orders...")
     
     try:
+        logger.info("Calling /api/mt5/orders endpoint")
         data = await api_service.make_api_call("/api/mt5/orders")
+        logger.info(f"Orders API response: {data}")
+        
+        if data is None:
+            await loading_msg.edit_text("❌ **API Error:** Could not connect to the server. Please try again.")
+            return
+        
+        # Check if data contains an error
+        if isinstance(data, dict) and "error" in data:
+            error_msg = data["error"]
+            if "not connected" in error_msg.lower():
+                await loading_msg.edit_text("❌ **MT5 Not Connected**\n\nPlease use `/connect` to connect to your MT5 account first.")
+            else:
+                await loading_msg.edit_text(f"❌ **Error:** {error_msg}")
+            return
         
         if data and len(data) > 0:
             response = "⏳ **Pending Orders**\n\n"
@@ -1013,7 +1311,8 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(response, parse_mode='Markdown')
         
     except Exception as e:
-        await loading_msg.edit_text("❌ Error fetching orders. Please try again.")
+        logger.error(f"Error in orders command: {e}")
+        await loading_msg.edit_text("❌ **Error:** Could not fetch orders. Please try again.")
 
 async def close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Close specific position"""
@@ -1145,6 +1444,83 @@ async def modify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You can find the ticket number using the /positions command.",
         parse_mode='Markdown'
     )
+
+async def ai_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts the AI trading service."""
+    loading_msg = await update.message.reply_text("▶️ Starting AI trading service...")
+    try:
+        response = await api_service.make_api_call("/api/ai/start", method="POST")
+        if response and response.get("status") == "success":
+            await loading_msg.edit_text("✅ AI Trading Service is now running.")
+        else:
+            await loading_msg.edit_text(f"❌ Error: {response.get('message', 'Could not start AI service.')}")
+    except Exception as e:
+        await loading_msg.edit_text(f"❌ An unexpected error occurred: {e}")
+
+async def ai_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stops the AI trading service."""
+    loading_msg = await update.message.reply_text("⏹️ Stopping AI trading service...")
+    try:
+        response = await api_service.make_api_call("/api/ai/stop", method="POST")
+        if response and response.get("status") == "success":
+            await loading_msg.edit_text("🛑 AI Trading Service has been stopped.")
+        else:
+            await loading_msg.edit_text(f"❌ Error: {response.get('message', 'Could not stop AI service.')}")
+    except Exception as e:
+        await loading_msg.edit_text(f"❌ An unexpected error occurred: {e}")
+
+async def ai_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gets the current status of the AI trading service."""
+    loading_msg = await update.message.reply_text("🤖 Checking AI status...")
+    try:
+        response = await api_service.make_api_call("/api/ai/status")
+        if response:
+            status = "✅ Running" if response.get("is_running") else "🛑 Stopped"
+            status_text = (
+                f"**AI Trading Status**\n\n"
+                f"**Status:** {status}\n"
+                f"**Trades Today:** {response.get('daily_trades', 0)} / {response.get('max_daily_trades', 0)}\n"
+                f"**Daily P&L:** ${response.get('daily_pnl', 0.0):.2f}"
+            )
+            await loading_msg.edit_text(status_text, parse_mode='Markdown')
+        else:
+            await loading_msg.edit_text("❌ Could not retrieve AI status.")
+    except Exception as e:
+        await loading_msg.edit_text(f"❌ An unexpected error occurred: {e}")
+
+async def ai_config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the current AI configuration and allows for changes."""
+    text = (
+        f"**AI Configuration**\n\n"
+        f"▶️ **Shadow Mode:** {'✅ On' if ai_config.SHADOW_MODE else '❌ Off'}\n"
+        f"▶️ **Conflict Avoidance:** {'✅ On' if ai_config.AVOID_OPPOSING_MANUAL_TRADES else '❌ Off'}\n"
+        f"▶️ **Max Total Trades:** {ai_config.MAX_TOTAL_OPEN_TRADES}\n\n"
+        "Select a setting to toggle:"
+    )
+    keyboard = [
+        [InlineKeyboardButton("Toggle Shadow Mode", callback_data="ai_toggle:shadow")],
+        [InlineKeyboardButton("Toggle Conflict Avoidance", callback_data="ai_toggle:conflict")],
+        [InlineKeyboardButton("Close", callback_data="ai_toggle:close")]
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def ai_config_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles callbacks for changing AI config."""
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data.split(':')[1]
+
+    if action == 'shadow':
+        ai_config.SHADOW_MODE = not ai_config.SHADOW_MODE
+    elif action == 'conflict':
+        ai_config.AVOID_OPPOSING_MANUAL_TRADES = not ai_config.AVOID_OPPOSING_MANUAL_TRADES
+    elif action == 'close':
+        await query.edit_message_text("Configuration menu closed.")
+        return
+
+    # Refresh the message with the new settings
+    await ai_config_command(query, context)
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_personal_menu(update, context)
@@ -1388,6 +1764,7 @@ async def place_final_order(query: Update, context: ContextTypes.DEFAULT_TYPE, s
         "symbol": order_data['symbol'],
         "lot": order_data['lot'],
         "type": order_type,
+        "magic": ai_config.MANUAL_MAGIC_NUMBER # Tag as a manual trade
     }
     if order_data['sl'] > 0:
         api_payload['sl'] = order_data['sl']
@@ -1510,7 +1887,7 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler('menu', menu_command))
     app.add_handler(CommandHandler('signals', signals))
     app.add_handler(CommandHandler('market', market))
-    app.add_handler(CommandHandler('analysis', analysis))
+    app.add_handler(CommandHandler('analysis', analyze))
     app.add_handler(CommandHandler('risk', risk))
     app.add_handler(CommandHandler('trades', trades))
     app.add_handler(CommandHandler('strategies', strategies))
@@ -1539,6 +1916,14 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler("orderblock_performance", orderblock_performance))
     app.add_handler(CommandHandler("orderblock_settings", orderblock_settings))
     app.add_handler(CommandHandler("modify", modify_command))
+    # AI Commands
+    app.add_handler(CommandHandler("ai_start", ai_start_command))
+    app.add_handler(CommandHandler("ai_stop", ai_stop_command))
+    app.add_handler(CommandHandler("ai_status", ai_status_command))
+    app.add_handler(CommandHandler("ai_config", ai_config_command))
+    app.add_handler(CallbackQueryHandler(ai_config_callback, pattern='^ai_toggle:'))
+    app.add_handler(CommandHandler("signal", signal))
+    app.add_handler(CommandHandler("disconnect", disconnect))
 
 async def run_network_diagnostics():
     """Run comprehensive network diagnostics."""
@@ -1587,22 +1972,30 @@ async def start_telegram_bot(telegram_token: str = None, shutdown_event_param: a
         # Setup bot handlers
         setup_handlers(telegram_app)
         
+        # Set the global application instance
+        global application
+        application = telegram_app
+        
         # Initialize the application
         await telegram_app.initialize()
         
         # Set bot commands for Telegram UI
         await set_bot_commands(telegram_app)
         
-        # Delete any existing webhook to ensure polling mode
+        # Delete any existing webhook to ensure polling mode is used
         try:
             webhook_info = await telegram_app.bot.get_webhook_info()
-            if webhook_info.url:
-                logger.info(f"Deleting existing webhook: {webhook_info.url}")
-                await telegram_app.bot.delete_webhook()
+            if webhook_info and webhook_info.url:
+                logger.info(f"Existing webhook found: {webhook_info.url}. Deleting it now.")
+                if await telegram_app.bot.delete_webhook(drop_pending_updates=True):
+                    logger.info("Webhook deleted successfully.")
+                else:
+                    logger.warning("Failed to delete webhook.")
         except Exception as e:
-            logger.warning(f"Error deleting webhook: {e}")
-        
+            logger.error(f"Error checking or deleting webhook: {e}", exc_info=True)
+
         # Start the bot in polling mode
+        logger.info("Starting bot in polling mode...")
         await telegram_app.start()
         await telegram_app.updater.start_polling(
             timeout=30,
@@ -1720,5 +2113,141 @@ async def set_bot_commands(application):
         ("price", "Get current price"),
         ("summary", "Trading summary"),
         ("strategies", "Learn about our strategies"),
-        ("help", "Show this command list")
+        ("help", "Show this command list"),
+        ("ai_start", "Start the AI trading bot"),
+        ("ai_stop", "Stop the AI trading bot"),
+        ("ai_status", "Get AI trading status"),
+        ("ai_config", "Configure AI settings")
     ])
+
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Return a trading signal for a specified pair."""
+    from app.services.ai_config import ai_config
+    allowed_pairs = ai_config.SYMBOLS
+    if not context.args:
+        await update.message.reply_text(f"Please specify a pair. Example: /signal EURUSD\nAllowed: {', '.join(allowed_pairs)}")
+        return
+    pair = context.args[0].upper()
+    if pair not in allowed_pairs:
+        await update.message.reply_text(f"❌ {pair} is not supported. Allowed: {', '.join(allowed_pairs)}")
+        return
+    try:
+        signal_data = await signal_service.get_signal_for_pair(pair)
+        if not signal_data or isinstance(signal_data, str):
+            await update.message.reply_text(f"❌ No signal available for {pair} at this time.")
+            return
+        text = (
+            f"📡 **Signal for {pair}**\n"
+            f"Strategy: {signal_data.get('strategy', 'N/A')}\n"
+            f"Entry Range: {signal_data.get('entry_range', 'N/A')}\n"
+            f"Stop Loss: {signal_data.get('stop_loss', 'N/A')}\n"
+            f"Take Profit: {signal_data.get('take_profit', 'N/A')}\n"
+            f"Confidence: {signal_data.get('confidence', 'N/A')}\n"
+            f"Risk/Reward: {signal_data.get('risk_reward_ratio', 'N/A')}\n"
+        )
+        await update.message.reply_text(text, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error fetching signal for {pair}: {e}")
+
+ALLOWED_PAIRS = ["GBPUSD", "EURUSD", "GBPJPY", "NZDUSD", "AUDCAD", "GOLD", "XAUUSD"]
+
+async def parse_order_command(update, context, side):
+    """Parse and validate /buy or /sell command."""
+    args = context.args
+    allowed_pairs = [p.upper() for p in ai_config.SYMBOLS]
+    if len(args) < 2:
+        example = f"/{side} EURUSD 0.10"  # market order example
+        example_limit = f"/{side} GBPJPY 1.5 200.123"  # limit order example
+        await update.message.reply_text(
+            f"Invalid command format.\n"
+            f"Examples:\n"
+            f"• {example}  (market order)\n"
+            f"• {example_limit}  (limit order)\n"
+            f"Format: /{side} PAIR LOTSIZE [PRICE]"
+        )
+        return
+    pair = args[0].upper()
+    if pair == "GOLD":
+        pair = "XAUUSD"
+    if pair not in allowed_pairs:
+        allowed_str = ', '.join([p if p != "XAUUSD" else "GOLD" for p in allowed_pairs])
+        await update.message.reply_text(f"Invalid pair. Allowed: {allowed_str}")
+        return
+    # Lot size validation
+    try:
+        lot = float(args[1])
+    except Exception:
+        await update.message.reply_text("Invalid lot size format")
+        return
+    if lot < 0.01 or lot > 100:
+        await update.message.reply_text("Lot size must be between 0.01 and 100")
+        return
+    # Price validation (optional, for limit orders)
+    price = None
+    if len(args) == 3:
+        try:
+            price = float(args[2])
+        except Exception:
+            await update.message.reply_text("Price must be positive number")
+            return
+        if price <= 0:
+            await update.message.reply_text("Price must be positive number")
+            return
+        # Decimal places validation
+        if pair == "XAUUSD":
+            if not (round(price, 2) == price):
+                await update.message.reply_text("Price for GOLD must have up to 2 decimal places")
+                return
+        elif pair.endswith("JPY"):
+            if not (round(price, 3) == price):
+                await update.message.reply_text("Price for JPY pairs must have up to 3 decimal places")
+                return
+        else:
+            if not (round(price, 5) == price):
+                await update.message.reply_text(f"Price for {pair} must have up to 5 decimal places")
+                return
+    elif len(args) > 3:
+        example = f"/{side} EURUSD 0.10"  # market order example
+        example_limit = f"/{side} GBPJPY 1.5 200.123"  # limit order example
+        await update.message.reply_text(
+            f"Invalid command format.\n"
+            f"Examples:\n"
+            f"• {example}  (market order)\n"
+            f"• {example_limit}  (limit order)\n"
+            f"Format: /{side} PAIR LOTSIZE [PRICE]"
+        )
+        return
+    # If all validations pass, reply with parsed order (or process order here)
+    order_type = "limit" if price is not None else "market"
+    await update.message.reply_text(
+        f"Order parsed:\nType: {side.upper()} {order_type}\nPair: {pair}\nLot size: {lot}\n" + (f"Price: {price}" if price is not None else "")
+    )
+
+async def disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Disconnect MT5 and clear stored credentials for the user."""
+    user_id = update.effective_user.id
+    credential_manager.delete_credentials(user_id)
+    # Optionally, call an API endpoint to disconnect MT5 session if needed
+    await update.message.reply_text("🔌 Disconnected from MT5 and credentials cleared.")
+
+# Helper to auto-connect MT5 for a user if not connected
+async def ensure_mt5_connected(user_id):
+    creds = credential_manager.get_credentials(user_id)
+    if creds:
+        login, password, server = creds
+        # Call your API to connect if not already connected
+        # (You may want to cache connection state per user in memory for efficiency)
+        await api_service.make_api_call("/api/mt5/connect", method="POST", json={
+            "login": login,
+            "password": password,
+            "server": server
+        })
+        return True
+    return False
+
+
+
+# Setup CredentialManager if not already present
+CREDENTIAL_KEY = os.getenv('CREDENTIAL_KEY', Fernet.generate_key())
+CREDENTIAL_DB = os.getenv('CREDENTIAL_DB', 'mt5_credentials.db')
+credential_manager = CredentialManager(CREDENTIAL_DB, CREDENTIAL_KEY)

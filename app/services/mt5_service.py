@@ -7,6 +7,7 @@ Uses actual MT5 API calls for real trading functionality.
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+from .ai_config import AIConfig
 
 try:
     import MetaTrader5 as mt5
@@ -217,9 +218,12 @@ class MT5Service:
             logger.error(f"MT5 account error: {e}")
             return None
     
-    async def place_order(self, symbol: str, lot: float, order_type: str, 
-                         sl: Optional[float] = None, tp: Optional[float] = None) -> Dict[str, Any]:
-        """Place a market order."""
+    async def place_order(self, symbol: str, lot: float, order_type: str,
+                        sl_pips: int = None, tp_pips: int = None, magic_number: int = 0, price: float = None) -> Dict[str, Any]:
+        """
+        Places a trade order on MT5. Includes Stop Loss and Take Profit in pips.
+        Supports both market and limit orders.
+        """
         if not MT5_AVAILABLE:
             return {"success": False, "error": "MetaTrader5 package not available"}
             
@@ -242,37 +246,56 @@ class MT5Service:
                 return {"success": False, "error": f"Failed to get tick for {symbol}"}
             
             # Determine order type and price
-            if order_type.lower() == "buy":
+            order_type_lower = order_type.lower()
+            if order_type_lower == "buy":
                 order_type_mt5 = mt5.ORDER_TYPE_BUY
-                price = tick.ask
-            elif order_type.lower() == "sell":
+                market_price = tick.ask
+            elif order_type_lower == "sell":
                 order_type_mt5 = mt5.ORDER_TYPE_SELL
-                price = tick.bid
+                market_price = tick.bid
             else:
                 return {"success": False, "error": "Invalid order type. Use 'buy' or 'sell'"}
             
-            # Prepare order request
+            # Calculate stop loss and take profit prices only if provided
+            sl_price = None
+            tp_price = None
+            if sl_pips is not None and sl_pips != 0:
+                if order_type_lower == "buy":
+                    sl_price = market_price - abs(sl_pips) * symbol_info.point
+                else:
+                    sl_price = market_price + abs(sl_pips) * symbol_info.point
+            if tp_pips is not None and tp_pips != 0:
+                if order_type_lower == "buy":
+                    tp_price = market_price + abs(tp_pips) * symbol_info.point
+                else:
+                    tp_price = market_price - abs(tp_pips) * symbol_info.point
+
+            # Distinguish between market and limit orders
+            is_limit_order = price is not None
             request = {
-                "action": mt5.TRADE_ACTION_DEAL,
+                "action": mt5.TRADE_ACTION_DEAL if not is_limit_order else mt5.TRADE_ACTION_PENDING,
                 "symbol": symbol,
                 "volume": lot,
-                "type": order_type_mt5,
-                "price": price,
+                "type": order_type_mt5 if not is_limit_order else (mt5.ORDER_TYPE_BUY_LIMIT if order_type_lower == "buy" else mt5.ORDER_TYPE_SELL_LIMIT),
                 "deviation": 20,
-                "magic": 234000,
-                "comment": "python telegram bot order",
+                "magic": magic_number,
+                "comment": "AI Trade" if magic_number == AIConfig.AI_MAGIC_NUMBER else "Manual Trade",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
-            
-            # Add stop loss and take profit if provided
-            if sl is not None:
-                request["sl"] = sl
-            if tp is not None:
-                request["tp"] = tp
-            
+            if is_limit_order:
+                request["price"] = price
+            else:
+                request["price"] = market_price
+            if sl_price is not None:
+                request["sl"] = sl_price
+            if tp_price is not None:
+                request["tp"] = tp_price
+
+            logger.info(f"MT5 order request: {request}")
             # Send order
             result = mt5.order_send(request)
+            logger.info(f"MT5 order result: {result}")
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 return {"success": False, "error": f"Order failed: {result.comment}"}
             
@@ -284,47 +307,46 @@ class MT5Service:
                 "lot": lot,
                 "type": order_type,
                 "price": result.price,
-                "sl": sl,
-                "tp": tp
+                "sl": sl_pips,
+                "tp": tp_pips
             }
             
         except Exception as e:
-            logger.error(f"MT5 order error: {e}")
-            return {"success": False, "error": str(e)}
+            logger.error(f"Error placing order for {symbol}: {e}", exc_info=True)
+            return {"success": False, "error": f"An unexpected error occurred: {e}"}
     
-    async def get_positions(self) -> List[Dict[str, Any]]:
-        """Get open positions."""
+    async def get_positions(self, symbol: str = None, magic_number: int = None) -> list:
+        """
+        Get all open positions, with optional filtering by symbol and/or magic number.
+        """
         if not MT5_AVAILABLE:
+            logger.warning("MetaTrader5 package not available")
             return []
         
         if not self.connected:
+            logger.warning("MT5 not connected")
             return []
         
         try:
-            positions = mt5.positions_get()
-            if positions is None:
-                return []
-            
-            positions_list = []
-            for position in positions:
-                pos_dict = {
-                    "ticket": position.ticket,
-                    "symbol": position.symbol,
-                    "type": "buy" if position.type == 0 else "sell",
-                    "lot": position.volume,
-                    "price_open": position.price_open,
-                    "price_current": position.price_current,
-                    "profit": position.profit,
-                    "sl": position.sl,
-                    "tp": position.tp,
-                    "time": position.time
-                }
-                positions_list.append(pos_dict)
-            
-            return positions_list
-            
+            if symbol:
+                if magic_number is not None:
+                    positions = mt5.positions_get(symbol=symbol)
+                    if positions:
+                        return [p for p in positions if p.magic == magic_number]
+                else:
+                    return mt5.positions_get(symbol=symbol) or []
+            else:
+                if magic_number is not None:
+                    positions = mt5.positions_get()
+                    if positions:
+                        return [p for p in positions if p.magic == magic_number]
+                else:
+                    positions = mt5.positions_get()
+                    logger.info(f"Retrieved {len(positions) if positions else 0} positions from MT5")
+                    return positions or []
+
         except Exception as e:
-            logger.error(f"MT5 positions error: {e}")
+            logger.error(f"Error fetching positions: {e}", exc_info=True)
             return []
     
     async def get_orders(self) -> List[Dict[str, Any]]:
@@ -570,6 +592,95 @@ class MT5Service:
             error_message = f"An unexpected error occurred while modifying position {ticket}: {e}"
             logger.error(error_message, exc_info=True)
             return {"success": False, "error": error_message}
+
+    async def get_pip_value(self, symbol: str, lot_size: float) -> float:
+        """
+        Calculates the value of one pip for a given symbol and lot size, for a USD account.
+        """
+        if not self.connected:
+            return 0.0
+
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Failed to get symbol info for {symbol}")
+            return 0.0
+
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            logger.error(f"Failed to get tick data for {symbol}")
+            return 0.0
+
+        contract_size = symbol_info.contract_size
+        point = symbol_info.point
+        
+        # Determine the pip size (e.g., 0.0001 for EURUSD, 0.01 for USDJPY)
+        pip_size = point * 10 if "JPY" not in symbol else 0.01
+        
+        # Calculate the value of one pip in the quote currency
+        pip_value_in_quote = pip_size * contract_size * lot_size
+
+        quote_currency = symbol[3:]
+        
+        if quote_currency == 'USD':
+            # If the quote currency is USD, the value is direct
+            return pip_value_in_quote
+        
+        elif symbol.startswith('USD'):
+            # For pairs like USD/JPY, USD/CAD
+            return pip_value_in_quote / tick.ask
+
+        else:
+            # For cross pairs like EUR/GBP, GBP/JPY, we need to convert from quote to USD
+            # We need the exchange rate for Quote/USD
+            conversion_pair = f"{quote_currency}USD"
+            conversion_tick = mt5.symbol_info_tick(conversion_pair)
+            
+            if conversion_tick:
+                return pip_value_in_quote * conversion_tick.ask
+            else:
+                # If a direct conversion pair doesn't exist (e.g. AUDCAD -> CADUSD)
+                # try the inverse.
+                inverse_conversion_pair = f"USD{quote_currency}"
+                inverse_tick = mt5.symbol_info_tick(inverse_conversion_pair)
+                if inverse_tick:
+                    return pip_value_in_quote / inverse_tick.ask
+                else:
+                    logger.error(f"Cannot determine pip value for {symbol}. No USD conversion rate found for {quote_currency}.")
+                    return 0.0
+
+    async def get_candles(self, symbol: str, timeframe_str: str, count: int):
+        """Fetches historical candle data from MT5."""
+        if not self.connected:
+            return None
+
+        timeframe_map = {
+            "1m": mt5.TIMEFRAME_M1,
+            "5m": mt5.TIMEFRAME_M5,
+            "15m": mt5.TIMEFRAME_M15,
+            "30m": mt5.TIMEFRAME_M30,
+            "1h": mt5.TIMEFRAME_H1,
+            "4h": mt5.TIMEFRAME_H4,
+            "1d": mt5.TIMEFRAME_D1,
+        }
+        timeframe = timeframe_map.get(timeframe_str.lower())
+        if timeframe is None:
+            logger.error(f"Unsupported timeframe: {timeframe_str}")
+            return None
+
+        try:
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+            if rates is None or len(rates) == 0:
+                logger.warning(f"Could not fetch candle data for {symbol} on {timeframe_str}.")
+                return None
+            
+            # Convert to pandas DataFrame for easier analysis
+            import pandas as pd
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            return df
+        except Exception as e:
+            logger.error(f"Error fetching candles for {symbol}: {e}", exc_info=True)
+            return None
 
 # Global MT5 service instance
 mt5_service = MT5Service() 
