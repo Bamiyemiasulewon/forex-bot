@@ -78,12 +78,6 @@ class AITradingService:
                     await asyncio.sleep(3600)  # Sleep for 1 hour
                     continue
 
-                # Restrict trading to 7am-8pm only (server/broker time)
-                if not (7 <= now.hour <= 20):
-                    logger.info("Outside allowed trading hours (7:00-20:59). AI trading paused.")
-                    await asyncio.sleep(600)  # Sleep for 10 minutes
-                    continue
-
                 # Check and close existing trades based on Market Structure signals
                 await self._check_and_close_trades()
 
@@ -131,9 +125,9 @@ class AITradingService:
         if now.weekday() == 4 and now.hour >= 18:
             logger.info("Friday after 18:00. No trading allowed.")
             return
-        # Trading hours restriction
-        if not (7 <= now.hour <= 20):
-            logger.info("Outside allowed trading hours (7:00-20:00). Skipping trade.")
+        # Trading hours restriction: only trade between 7am and 7pm
+        if not (7 <= now.hour < 19):
+            logger.info("Outside allowed trading hours (7:00-18:59). Skipping trade.")
             return
         # Spread/slippage/volatility checks (placeholders)
         spread = self._get_spread(symbol)
@@ -206,7 +200,7 @@ class AITradingService:
         position_size = max(position_size, self.config.MIN_POSITION_SIZE)
         # Final pre-trade checklist
         checklist = [
-            (7 <= now.hour <= 20),
+            (7 <= now.hour < 19),  # Only allow trades between 7am and 7pm
             self.risk_manager.can_trade_pair_today(symbol),
             market_structure_signal.get('trend') in ['bullish', 'bearish'],
             market_structure_signal.get('order_blocks_count', 0) > 0,
