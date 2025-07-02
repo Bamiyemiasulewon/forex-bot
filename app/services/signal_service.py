@@ -249,4 +249,9 @@ class SignalService:
             return {"error": f"Error fetching signal for {pair}: {e}"}
         return {"error": f"No signal available for {pair} at this time."}
 
+    def clear_trade_history(self, user_id=None):
+        """Clear trade history for the user (stub, implement as needed)."""
+        # If you cache trade history per user, clear it here.
+        pass
+
 signal_service = SignalService() 

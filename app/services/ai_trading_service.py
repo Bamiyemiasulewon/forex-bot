@@ -122,98 +122,110 @@ class AITradingService:
     async def _analyze_and_trade(self, symbol: str):
         """Analyzes a single symbol and executes a trade if conditions are met, using the custom Market Structure strategy only."""
         logger.info(f"Analyzing {symbol} with Market Structure strategy...")
-
-        # 0. Check if pair has been traded today (only one trade per pair per day)
+        now = datetime.datetime.now()
+        # News event filter
+        if self._is_major_news_event(symbol, now=now):
+            logger.info(f"Major news event detected for {symbol}. Skipping trade.")
+            return
+        # Friday after 18:00 restriction
+        if now.weekday() == 4 and now.hour >= 18:
+            logger.info("Friday after 18:00. No trading allowed.")
+            return
+        # Trading hours restriction
+        if not (7 <= now.hour <= 20):
+            logger.info("Outside allowed trading hours (7:00-20:00). Skipping trade.")
+            return
+        # Spread/slippage/volatility checks (placeholders)
+        spread = self._get_spread(symbol)
+        if spread is not None and spread > 2.0:
+            logger.info(f"Spread too wide for {symbol}: {spread} pips. Skipping trade.")
+            return
+        # Only one trade per pair per day
         if not self.risk_manager.can_trade_pair_today(symbol):
             logger.info(f"Pair {symbol} already traded today. Skipping.")
             return
-
-        # 0. Coexistence & Safety Checks
-        all_positions = await self.mt5.get_positions()
-        if len(all_positions) >= self.config.MAX_TOTAL_OPEN_TRADES:
-            logger.warning(f"Maximum total trades of {self.config.MAX_TOTAL_OPEN_TRADES} reached. AI is pausing.")
+        # Drawdown and consecutive loss checks
+        if self.risk_manager.get_drawdown() > 0.05:
+            logger.info("Account drawdown exceeds 5%. Skipping trade.")
             return
-
+        if self.risk_manager.get_consecutive_losses() >= 2:
+            logger.info("2 consecutive losses. Skipping trade for the day.")
+            return
         # Per-pair daily loss prevention
         balance_info = await self.mt5.get_balance()
         if not balance_info:
             logger.warning("Could not fetch balance info for risk check.")
             return
-        
         balance = balance_info.get('balance', 0)
         daily_pair_loss = self.risk_manager.daily_pair_pnl.get(symbol, 0)
         max_daily_loss_per_pair = balance * 0.02  # 2% of balance
-        
         if daily_pair_loss < -max_daily_loss_per_pair:
             logger.warning(f"Daily loss limit reached for {symbol}. Skipping trade.")
             return
-
         # 1. Fetch Market Data for all required timeframes
-        # M15 or H1 for market structure
         df_m15 = await self.signal_service.fetch_ohlcv(symbol, interval='15min', outputsize='compact')
         df_h1 = await self.signal_service.fetch_ohlcv(symbol, interval='60min', outputsize='compact')
-        # M5 or M1 for POI
         df_m5 = await self.signal_service.fetch_ohlcv(symbol, interval='5min', outputsize='compact')
         df_m1 = await self.signal_service.fetch_ohlcv(symbol, interval='1min', outputsize='compact')
-        # M3 for inducement (if available)
         try:
             df_m3 = await self.signal_service.fetch_ohlcv(symbol, interval='3min', outputsize='compact')
         except Exception:
             df_m3 = None
-
-        # Use the main strategy analyzer (which combines all these)
-        # Pass the most granular data (M1) for entry logic
         df_for_analysis = df_m1 if df_m1 is not None and len(df_m1) >= 50 else df_m15
         if df_for_analysis is None or len(df_for_analysis) < 50:
             logger.warning(f"Insufficient market data for {symbol}")
             return
-
         # 2. Market Structure Analysis (uses all timeframes internally)
         market_structure_signal = market_structure_strategy.analyze_pair(df_for_analysis, symbol)
         if not market_structure_signal:
             logger.info(f"No Market Structure signal for {symbol}")
             return
-
         signal_type = market_structure_signal.get('signal')
         if not signal_type:
             logger.warning(f"No valid signal type for {symbol}")
             return
-
         # 3. Risk Management Check
         if not self.risk_manager.can_trade():
             logger.warning(f"Risk management blocked trade for {symbol}")
             return
-
         # 4. Position Size Calculation
         entry_price = market_structure_signal.get('entry_price')
         stop_loss = market_structure_signal.get('stop_loss')
-        
         if not entry_price or not stop_loss:
             logger.warning(f"Missing entry or stop loss price for {symbol}")
             return
-
         # Calculate position size based on risk
         risk_amount = balance * self.config.RISK_PER_TRADE
         pip_value = await self.market_service.get_pip_value_in_usd(symbol, 0.01)  # 0.01 lot
         stop_loss_pips = abs(entry_price - stop_loss) / 0.0001  # Convert to pips
-        
         if pip_value <= 0 or stop_loss_pips <= 0:
             logger.warning(f"Invalid pip value or stop loss for {symbol}")
             return
-
         position_size = risk_amount / (pip_value * stop_loss_pips)
         position_size = min(position_size, self.config.MAX_POSITION_SIZE)
         position_size = max(position_size, self.config.MIN_POSITION_SIZE)
-
+        # Final pre-trade checklist
+        checklist = [
+            (7 <= now.hour <= 20),
+            self.risk_manager.can_trade_pair_today(symbol),
+            market_structure_signal.get('trend') in ['bullish', 'bearish'],
+            market_structure_signal.get('order_blocks_count', 0) > 0,
+            market_structure_signal.get('inducement_detected'),
+            position_size > 0,
+            market_structure_signal.get('take_profit') is not None,
+            not self._is_major_news_event(symbol, now=now),
+            self.risk_manager.get_drawdown() <= 0.05,
+            spread is None or spread <= 2.0
+        ]
+        if not all(checklist):
+            logger.info(f"Final checklist failed for {symbol}. Skipping trade.")
+            return
         # 5. Execute Trade
         try:
             order_type = "buy" if signal_type == "BUY" else "sell"
             take_profit = market_structure_signal.get('take_profit')
-            
-            # Convert pips to price for SL/TP
             sl_pips = abs(entry_price - stop_loss) / 0.0001
             tp_pips = abs(entry_price - take_profit) / 0.0001 if take_profit else None
-            
             result = await self.mt5.place_order(
                 symbol=symbol,
                 order_type=order_type,
@@ -224,7 +236,6 @@ class AITradingService:
             if result.get('success'):
                 logger.info(f"Trade placed for {symbol}: {order_type} {position_size} lots at {entry_price}")
                 await self._send_trade_notification(symbol, order_type, position_size, entry_price, stop_loss, take_profit, market_structure_signal)
-                # Send user alert/notification as soon as trade is placed
                 if hasattr(self, 'notifier') and self.notifier:
                     trade_info = {
                         'symbol': symbol,
@@ -242,6 +253,10 @@ class AITradingService:
                 logger.error(f"Failed to place trade for {symbol}: {result}")
         except Exception as e:
             logger.error(f"Error placing trade for {symbol}: {e}")
+
+    def _get_spread(self, symbol):
+        """Placeholder: Returns the current spread in pips for the symbol. Replace with real implementation."""
+        return 1.5  # Example: always 1.5 pips
 
     async def _check_and_close_trades(self):
         """Check existing trades and close them based on Market Structure strategy signals."""
@@ -329,4 +344,19 @@ class AITradingService:
             if hasattr(self, 'notifier') and self.notifier:
                 await self.notifier.send_message(message)
         except Exception as e:
-            logger.error(f"Error sending trade notification: {e}") 
+            logger.error(f"Error sending trade notification: {e}")
+
+    def reset_user_history(self, user_id=None):
+        """Reset all AI trade/PNL state for a new account login."""
+        self.risk_manager.reset_all_state()
+        logger.info("AITradingService: User/AI history reset due to new account login.")
+
+    def _is_major_news_event(self, symbol, now=None):
+        """Placeholder: Returns True if a major news event is within 30 minutes before/after now."""
+        # TODO: Integrate with real economic calendar/news API
+        # For now, always return False (no news event)
+        return False
+
+    def _get_spread(self, symbol):
+        """Placeholder: Returns the current spread in pips for the symbol. Replace with real implementation."""
+        return 1.5  # Example: always 1.5 pips 

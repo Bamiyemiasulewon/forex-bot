@@ -1187,6 +1187,11 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if data.get("success"):
                 # Store credentials securely
                 credential_manager.store_credentials(user_id, login, password, server)
+                # Reset AI and trade history for this user
+                from app.services.ai_trading_service import ai_trading_service
+                from app.services.signal_service import signal_service
+                ai_trading_service.reset_user_history(user_id)
+                signal_service.clear_trade_history(user_id)
                 await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
             else:
                 error_msg = data.get("error", "Connection failed. Please check your credentials.")

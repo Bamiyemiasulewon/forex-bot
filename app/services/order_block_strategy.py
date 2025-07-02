@@ -7,6 +7,7 @@ from app.utils.indicators import (
     calculate_rsi, calculate_fibonacci_levels, detect_break_of_structure,
     find_order_block, calculate_atr, is_at_fibonacci_level
 )
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +52,48 @@ class OrderBlockRSIFibStrategy:
         self.daily_trades = 0
         self.daily_pnl = 0.0
         self.last_reset_date = None
+        self._load_state()
         
+    def _get_state(self):
+        return {
+            "daily_trades": self.daily_trades,
+            "daily_pnl": self.daily_pnl,
+            "last_reset_date": self.last_reset_date
+        }
+
+    def _save_state(self):
+        try:
+            with open("orderblock_state.json", "w") as f:
+                json.dump(self._get_state(), f)
+        except Exception as e:
+            logger.error(f"Error saving order block state: {e}")
+
+    def _load_state(self):
+        try:
+            with open("orderblock_state.json", "r") as f:
+                state = json.load(f)
+                self.daily_trades = state.get("daily_trades", 0)
+                self.daily_pnl = state.get("daily_pnl", 0.0)
+                self.last_reset_date = state.get("last_reset_date")
+                self._auto_reset_if_new_day()
+        except Exception:
+            self.last_reset_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            self._save_state()
+
+    def _auto_reset_if_new_day(self):
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        if self.last_reset_date != today:
+            self.reset_daily_counters()
+            self.last_reset_date = today
+            self._save_state()
+            logger.info(f"OrderBlock: Auto-reset daily counters for new day: {today}")
+
     def reset_daily_counters(self):
-        """Reset daily trade counters if it's a new day."""
-        current_date = datetime.now(timezone.utc).date()
-        if self.last_reset_date != current_date:
-            self.daily_trades = 0
-            self.daily_pnl = 0.0
-            self.last_reset_date = current_date
-            logger.info("Daily counters reset for new trading day")
+        self.daily_trades = 0
+        self.daily_pnl = 0.0
+        self.last_reset_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        self._save_state()
+        logger.info("OrderBlock: Daily counters reset.")
     
     def is_trading_session(self) -> bool:
         """

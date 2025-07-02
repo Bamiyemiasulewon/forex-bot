@@ -204,6 +204,42 @@ class MarketStructureStrategy:
             "resistance_levels": resistance_levels
         }
     
+    def find_breaker_blocks(self, df: pd.DataFrame, trend: str) -> List[Dict]:
+        """Detect breaker blocks (structure break and retest)."""
+        breaker_blocks = []
+        if len(df) < 30:
+            return breaker_blocks
+        for i in range(10, len(df) - 10):
+            # Bullish breaker: break above previous high, then retest
+            if trend == "bullish":
+                prev_high = df['high'].iloc[i-10:i].max()
+                if df['high'].iloc[i] > prev_high:
+                    # Look for retest
+                    for j in range(i+1, min(i+6, len(df))):
+                        if df['low'].iloc[j] <= prev_high:
+                            breaker_blocks.append({
+                                "type": "bullish_breaker",
+                                "break_index": i,
+                                "retest_index": j,
+                                "break_level": prev_high
+                            })
+                            break
+            # Bearish breaker: break below previous low, then retest
+            elif trend == "bearish":
+                prev_low = df['low'].iloc[i-10:i].min()
+                if df['low'].iloc[i] < prev_low:
+                    # Look for retest
+                    for j in range(i+1, min(i+6, len(df))):
+                        if df['high'].iloc[j] >= prev_low:
+                            breaker_blocks.append({
+                                "type": "bearish_breaker",
+                                "break_index": i,
+                                "retest_index": j,
+                                "break_level": prev_low
+                            })
+                            break
+        return breaker_blocks
+    
     def analyze_pair(self, df: pd.DataFrame, pair: str) -> Optional[Dict]:
         """Main analysis method combining all market structure elements."""
         try:
@@ -223,8 +259,17 @@ class MarketStructureStrategy:
             if not order_blocks:
                 return None
             
-            # Get the strongest order block
-            strongest_block = max(order_blocks, key=lambda x: x['strength'])
+            # Order block age check (must be < 12 hours old)
+            latest_block = max(order_blocks, key=lambda x: x['index'])
+            block_time = df.index[latest_block['index']]
+            now = df.index[-1]
+            if hasattr(block_time, 'to_pydatetime'):
+                block_time = block_time.to_pydatetime()
+            if hasattr(now, 'to_pydatetime'):
+                now = now.to_pydatetime()
+            age_hours = (now - block_time).total_seconds() / 3600
+            if age_hours > 12:
+                return None
             
             # 3. Detect inducement
             inducements = self.detect_inducement(df, order_blocks)
@@ -235,8 +280,27 @@ class MarketStructureStrategy:
             # 5. Calculate Support/Resistance
             sr_levels = self.calculate_support_resistance(df)
             
-            # 6. Generate signal based on alignment
+            # 6. Breaker block logic
+            breaker_blocks = self.find_breaker_blocks(df, trend)
+            if not breaker_blocks:
+                return None
+            
+            # 7. Generate signal based on alignment
             signal = None
+            
+            # Only allow trade if a valid breaker block is present and retested
+            valid_breaker = None
+            for b in breaker_blocks:
+                if trend == "bullish" and b['type'] == "bullish_breaker" and b['retest_index'] > latest_block['index']:
+                    valid_breaker = b
+                    break
+                if trend == "bearish" and b['type'] == "bearish_breaker" and b['retest_index'] > latest_block['index']:
+                    valid_breaker = b
+                    break
+            if not valid_breaker:
+                return None
+            
+            strongest_block = max(order_blocks, key=lambda x: x['strength'])
             
             if trend == "bullish" and strongest_block['type'] == 'bullish_order_block':
                 # Look for bullish inducement
@@ -259,7 +323,8 @@ class MarketStructureStrategy:
                         "confidence": "85%",
                         "trend": trend,
                         "order_block_strength": round(strongest_block['strength'], 4),
-                        "inducement_detected": True
+                        "inducement_detected": True,
+                        "breaker_block": valid_breaker
                     }
             
             elif trend == "bearish" and strongest_block['type'] == 'bearish_order_block':
@@ -283,7 +348,8 @@ class MarketStructureStrategy:
                         "confidence": "85%",
                         "trend": trend,
                         "order_block_strength": round(strongest_block['strength'], 4),
-                        "inducement_detected": True
+                        "inducement_detected": True,
+                        "breaker_block": valid_breaker
                     }
             
             if signal:

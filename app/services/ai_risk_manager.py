@@ -3,6 +3,7 @@ import logging
 import json
 import os
 from typing import Dict, Any, List
+import datetime
 
 from .ai_config import AIConfig
 from .mt5_service import MT5Service
@@ -23,17 +24,26 @@ class AIRiskManager:
         self.daily_pair_trade_count = {}  # {pair: count}
         self.daily_pair_pnl = {}  # {pair: pnl}
         self.daily_pair_traded = {}  # {pair: True/False} - tracks if pair was traded today
+        self.last_reset_date = None
+        self.equity_peak = 0.0
+        self.last_equity = 0.0
+        self.consecutive_losses = 0
         self.load_state()
 
     def _get_state(self) -> Dict[str, Any]:
         """Gets the current state as a dictionary."""
-        return {
+        state = {
             "daily_trade_count": self.daily_trade_count,
             "daily_pnl": self.daily_pnl,
             "daily_pair_trade_count": self.daily_pair_trade_count,
             "daily_pair_pnl": self.daily_pair_pnl,
-            "daily_pair_traded": self.daily_pair_traded
+            "daily_pair_traded": self.daily_pair_traded,
+            "last_reset_date": self.last_reset_date,
+            "equity_peak": self.equity_peak,
+            "last_equity": self.last_equity,
+            "consecutive_losses": self.consecutive_losses
         }
+        return state
 
     def save_state(self):
         """Saves the current risk state to a file."""
@@ -48,6 +58,8 @@ class AIRiskManager:
         """Loads the risk state from a file if it exists."""
         if not os.path.exists(STATE_FILE):
             logger.info("No AI state file found. Starting fresh.")
+            self.last_reset_date = datetime.datetime.now().strftime('%Y-%m-%d')
+            self.save_state()
             return
 
         try:
@@ -58,9 +70,24 @@ class AIRiskManager:
                 self.daily_pair_trade_count = state.get("daily_pair_trade_count", {})
                 self.daily_pair_pnl = state.get("daily_pair_pnl", {})
                 self.daily_pair_traded = state.get("daily_pair_traded", {})
+                self.last_reset_date = state.get("last_reset_date")
+                self.equity_peak = state.get("equity_peak", 0.0)
+                self.last_equity = state.get("last_equity", 0.0)
+                self.consecutive_losses = state.get("consecutive_losses", 0)
+                self._auto_reset_if_new_day()
                 logger.info("AI risk state loaded successfully.")
         except (IOError, json.JSONDecodeError) as e:
             logger.error(f"Error loading AI state, starting fresh: {e}")
+            self.last_reset_date = datetime.datetime.now().strftime('%Y-%m-%d')
+            self.save_state()
+
+    def _auto_reset_if_new_day(self):
+        today = datetime.datetime.now().strftime('%Y-%m-%d')
+        if self.last_reset_date != today:
+            self.reset_daily_counters()
+            self.last_reset_date = today
+            self.save_state()
+            logger.info(f"Auto-reset daily counters for new day: {today}")
 
     def reset_daily_counters(self):
         """Resets all daily counters and pair tracking."""
@@ -69,6 +96,10 @@ class AIRiskManager:
         self.daily_pair_trade_count = {}
         self.daily_pair_pnl = {}
         self.daily_pair_traded = {}  # Reset daily pair trading status
+        self.last_reset_date = datetime.datetime.now().strftime('%Y-%m-%d')
+        self.equity_peak = 0.0
+        self.last_equity = 0.0
+        self.consecutive_losses = 0
         self.save_state()
         logger.info("🔄 Daily counters and pair tracking reset.")
 
@@ -158,5 +189,31 @@ class AIRiskManager:
         self.daily_pnl += pnl
         if pair:
             self.daily_pair_pnl[pair] = self.daily_pair_pnl.get(pair, 0.0) + pnl
+        # Drawdown and consecutive loss tracking
+        self.last_equity += pnl
+        if self.last_equity > self.equity_peak:
+            self.equity_peak = self.last_equity
+        if pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+        self.save_state()
         logger.info(f"Trade closed with P&L: ${pnl:.2f}. Total daily P&L: ${self.daily_pnl:.2f}.")
-        self.save_state() 
+
+    def get_drawdown(self):
+        if self.equity_peak == 0:
+            return 0.0
+        return (self.equity_peak - self.last_equity) / self.equity_peak
+
+    def get_consecutive_losses(self):
+        return self.consecutive_losses
+
+    def reset_all_state(self):
+        """Resets all AI trade/PNL state, for use when a new MT5 account is connected."""
+        self.daily_trade_count = 0
+        self.daily_pnl = 0.0
+        self.daily_pair_trade_count = {}
+        self.daily_pair_pnl = {}
+        self.daily_pair_traded = {}
+        self.save_state()
+        logger.info("🔄 All AI trade/PNL state reset due to new account login.") 

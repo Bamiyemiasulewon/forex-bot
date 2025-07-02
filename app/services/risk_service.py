@@ -1,5 +1,7 @@
 from typing import Dict, Optional
 from app.services.market_service import market_service
+import json
+import datetime
 
 class RiskService:
     # Initialize the risk management service with risk parameters for Order Block + RSI + Fibonacci strategy
@@ -10,6 +12,49 @@ class RiskService:
         self.max_daily_loss = max_daily_loss  # 10% daily loss limit
         self.daily_trades = 0
         self.daily_pnl = 0.0
+        self.last_reset_date = None
+        self._load_state()
+
+    def _get_state(self):
+        return {
+            "daily_trades": self.daily_trades,
+            "daily_pnl": self.daily_pnl,
+            "last_reset_date": self.last_reset_date
+        }
+
+    def _save_state(self):
+        try:
+            with open("risk_state.json", "w") as f:
+                json.dump(self._get_state(), f)
+        except Exception as e:
+            print(f"Error saving risk state: {e}")
+
+    def _load_state(self):
+        try:
+            with open("risk_state.json", "r") as f:
+                state = json.load(f)
+                self.daily_trades = state.get("daily_trades", 0)
+                self.daily_pnl = state.get("daily_pnl", 0.0)
+                self.last_reset_date = state.get("last_reset_date")
+                self._auto_reset_if_new_day()
+        except Exception:
+            self.last_reset_date = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+            self._save_state()
+
+    def _auto_reset_if_new_day(self):
+        today = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+        if self.last_reset_date != today:
+            self.reset_daily_counters()
+            self.last_reset_date = today
+            self._save_state()
+            print(f"RiskService: Auto-reset daily counters for new day: {today}")
+
+    def reset_daily_counters(self):
+        self.daily_trades = 0
+        self.daily_pnl = 0.0
+        self.last_reset_date = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+        self._save_state()
+        print("RiskService: Daily counters reset.")
 
     async def calculate_position_size(
         self,
