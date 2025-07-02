@@ -97,6 +97,7 @@ from app.services.ai_config import ai_config
 from app.services.signal_service import signal_service
 from cryptography.fernet import Fernet
 from app.services.order_block_strategy import order_block_strategy
+from app.services.market_structure_strategy import market_structure_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +412,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/signals - Show trading signals\n"
         "/market <pair> - Show market overview\n"
         "/analyze <pair> - Analyze specific pair (e.g. /analyze EURUSD)\n"
+        "/analyze_all - Analyze all pairs using Market Structure Strategy\n"
         "/signal <pair> - Get trading signal for pair\n"
         "/risk <pair> <risk%> <sl_pips> - Risk calculator\n"
         "/pipcalc <pair> <lot> - Calculate pip value\n\n"
@@ -431,7 +433,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/price <pair> - Get current price\n"
         "/summary - Trading summary\n\n"
         "**Trade History:**\n"
-        "/trades - Show recent trades\n"
+        "/trades - Show today's trades only\n"
+        "/trades_today - Show detailed today's trading status\n"
         "/history [pair] - Show detailed trade history\n\n"
         "**Strategies:**\n"
         "/strategies - Learn about strategies\n"
@@ -534,6 +537,39 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # Special handling for Gold (XAUUSD): only show price/basic info
     if pair == "XAUUSD":
+        # Try to fetch real OHLCV data for XAUUSD
+        from app.services.signal_service import signal_service
+        df = await signal_service.fetch_ohlcv(pair, interval='15min', outputsize='compact')
+        if df is not None and len(df) > 0:
+            price = df['close'].iloc[-1]
+            high = df['high'].max()
+            low = df['low'].min()
+            open_price = df['open'].iloc[0]
+            daily_range = high - low if high and low else 0
+            price_change = price - open_price if open_price else 0
+            price_change_pct = (price_change / open_price * 100) if open_price else 0
+            if price_change > 0:
+                trend = "🟢 BULLISH"
+                trend_emoji = "📈"
+            elif price_change < 0:
+                trend = "🔴 BEARISH"
+                trend_emoji = "📉"
+            else:
+                trend = "🟡 NEUTRAL"
+                trend_emoji = "➡️"
+            timestamp = df.index[-1] if hasattr(df.index[-1], 'strftime') else str(df.index[-1])
+            analysis_text = (
+                f"**{pair}**\n"
+                f"Price: `{price:,.2f}`\n"
+                f"Range: `{daily_range:,.2f}`\n"
+                f"Change: `{price_change:,.2f}` ({price_change_pct:+.2f}%)\n"
+                f"Trend: {trend_emoji} {trend}\n"
+                f"Support: `{low:,.2f}` | Resistance: `{high:,.2f}`\n"
+                f"Timestamp: {timestamp}"
+            )
+            await update.message.reply_text(f"📊 **Gold (XAUUSD) Market Analysis**\n\n{analysis_text}", parse_mode='Markdown')
+            return
+        # Fallback to price if OHLCV is unavailable
         data = await api_service.make_api_call(f"/api/market/{pair}")
         if not data or 'error' in data:
             await update.message.reply_text(f"❌ {pair}: Market data unavailable.")
@@ -631,25 +667,145 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading_msg.edit_text(error_msg)
 
 async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    loading_msg = await update.message.reply_text("📋 Fetching trade history...")
+    """Show today's trades only."""
+    loading_msg = await update.message.reply_text("📋 Fetching today's trades...")
     try:
+        # Get today's date in broker time
+        from app.services.mt5_service import mt5_service
+        today = await mt5_service.get_server_time()
+        today_str = today.strftime('%Y-%m-%d')
+        
         data = await safe_api_call_with_retry("/api/trades")
         if not data:
             await loading_msg.edit_text("😕 Could not fetch trades. The API server may be unavailable. Please try again later.")
             return
-        response = "📊 **Trade History**\n\n"
+        
+        # Filter for today's trades only
+        today_trades = []
         for trade in data:
+            trade_date = trade.get('open_time', '')
+            if isinstance(trade_date, str) and today_str in trade_date:
+                today_trades.append(trade)
+        
+        if not today_trades:
+            response = f"📊 **Today's Trades ({today_str})**\n\n"
+            response += "📭 No trades found for today.\n\n"
+            response += "💡 *Daily trade limit: 10 trades\n"
+            response += "💡 *One trade per pair per day*"
+            await loading_msg.edit_text(response, parse_mode='Markdown')
+            return
+        
+        response = f"📊 **Today's Trades ({today_str})**\n\n"
+        total_pnl = 0
+        closed_count = 0
+        open_count = 0
+        
+        for trade in today_trades:
             status_emoji = "✅" if trade['status'] == 'closed' else "⏳"
-            pnl_text = f"${trade['pnl']:.2f}" if trade['pnl'] is not None else "N/A"
+            pnl = trade.get('pnl', 0) or 0
+            if trade['status'] == 'closed':
+                total_pnl += pnl
+                closed_count += 1
+            else:
+                open_count += 1
+            
+            pnl_text = f"${pnl:.2f}" if pnl is not None else "N/A"
+            pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+            
             response += f"{status_emoji} **{trade['symbol']}** ({trade['order_type'].upper()})\n"
             response += f"Entry: `{trade['entry_price']}`"
             if trade['close_price']:
                 response += f" | Exit: `{trade['close_price']}`"
-            response += f"\nP&L: `{pnl_text}` | Status: {trade['status'].title()}\n\n"
+            response += f"\n{pnl_emoji} P&L: `{pnl_text}` | Status: {trade['status'].title()}\n\n"
+        
+        # Add summary
+        response += f"📈 **Today's Summary:**\n"
+        response += f"• Closed Trades: {closed_count}\n"
+        response += f"• Open Trades: {open_count}\n"
+        response += f"• Total P&L: ${total_pnl:.2f}\n"
+        response += f"• Daily Limit: {len(today_trades)}/10 trades\n\n"
+        response += "💡 *Daily reset happens at midnight (broker time)*"
+        
         await loading_msg.edit_text(response, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Error in trades command: {e}")
-        await loading_msg.edit_text("😕 An error occurred while fetching trades. Please try again later.")
+        await loading_msg.edit_text("😕 An error occurred while fetching today's trades. Please try again later.")
+
+async def trades_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show today's trades with detailed daily status."""
+    loading_msg = await update.message.reply_text("📋 Fetching today's trading status...")
+    try:
+        # Get today's date in broker time
+        from app.services.mt5_service import mt5_service
+        today = await mt5_service.get_server_time()
+        today_str = today.strftime('%Y-%m-%d')
+        
+        # Get daily status from risk manager
+        from app.services.ai_risk_manager import AIRiskManager
+        from app.services.ai_config import AIConfig
+        from app.services.mt5_service import MT5Service
+        
+        mt5 = MT5Service()
+        config = AIConfig()
+        risk_manager = AIRiskManager(config, mt5)
+        
+        daily_status = risk_manager.get_daily_pair_status()
+        
+        data = await safe_api_call_with_retry("/api/trades")
+        if not data:
+            await loading_msg.edit_text("😕 Could not fetch trades. The API server may be unavailable. Please try again later.")
+            return
+        
+        # Filter for today's trades only
+        today_trades = []
+        for trade in data:
+            trade_date = trade.get('open_time', '')
+            if isinstance(trade_date, str) and today_str in trade_date:
+                today_trades.append(trade)
+        
+        response = f"📊 **Today's Trading Status ({today_str})**\n\n"
+        
+        # Daily statistics
+        response += f"📈 **Daily Statistics:**\n"
+        response += f"• Total Trades: {daily_status['daily_trade_count']}/10\n"
+        response += f"• Daily P&L: ${daily_status['daily_pnl']:.2f}\n"
+        response += f"• Pairs Traded: {len(daily_status['pairs_traded_today'])}\n"
+        response += f"• Pairs Available: {len(daily_status['pairs_available_today'])}\n\n"
+        
+        # Pairs traded today
+        if daily_status['pairs_traded_today']:
+            response += f"✅ **Pairs Traded Today:**\n"
+            for pair in daily_status['pairs_traded_today']:
+                pnl = daily_status['daily_pair_pnl'].get(pair, 0)
+                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                response += f"• {pair}: {pnl_emoji} ${pnl:.2f}\n"
+            response += "\n"
+        
+        # Available pairs
+        if daily_status['pairs_available_today']:
+            response += f"🎯 **Available Pairs:**\n"
+            response += f"{', '.join(daily_status['pairs_available_today'][:6])}\n"
+            if len(daily_status['pairs_available_today']) > 6:
+                response += f"... and {len(daily_status['pairs_available_today']) - 6} more\n"
+            response += "\n"
+        
+        # Today's trades
+        if today_trades:
+            response += f"📋 **Today's Trades:**\n"
+            for trade in today_trades[-5:]:  # Show last 5 trades
+                status_emoji = "✅" if trade['status'] == 'closed' else "⏳"
+                pnl = trade.get('pnl', 0) or 0
+                pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                response += f"{status_emoji} {trade['symbol']} | {pnl_emoji} ${pnl:.2f} | {trade['order_type'].upper()}\n"
+        else:
+            response += f"📭 **No trades executed today.**\n"
+        
+        response += "\n💡 *Daily reset at midnight (broker time)*"
+        
+        await loading_msg.edit_text(response, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in trades_today command: {e}")
+        await loading_msg.edit_text("😕 An error occurred while fetching today's trading status. Please try again later.")
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed trade history with filtering options."""
@@ -759,23 +915,14 @@ async def pipcalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available trading strategies."""
-    strategies_text = '''📊 **TRADING STRATEGIES**
+    strategies_text = '''📊 **TRADING STRATEGY**
 
-🎯 **Order Block + RSI + Fibonacci (Primary)**
-• Break of structure detection
-• Order block identification  
-• Fibonacci retracement alignment (38.2%, 50%, 61.8%)
-• RSI confirmation (oversold < 30, overbought > 70)
-• Risk: 10% per trade, max 3 trades/day
-• Sessions: London (7-11 AM GMT), NY (12-4 PM GMT)
-
-📈 **RSI Strategy (Fallback)**
-• RSI oversold/overbought signals
-• Dynamic stop-loss based on ATR
-• 1:2 risk-reward ratio
-
-💡 **Use /orderblock for detailed strategy info**'''
-    
+• **Market Structure:** M15 or H1
+• **Point of Interest (Orderblock/Breakerblock):** M5 or M1
+• **Inducement:** M1 or M3
+• **Entry Execution:** M1
+• **Exit:** Based on FVG, Support, Resistance from M5/M15
+'''
     await update.message.reply_text(strategies_text, parse_mode='Markdown')
 
 async def orderblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2058,52 +2205,69 @@ async def place_final_modification(query: Update, context: ContextTypes.DEFAULT_
         session_manager.clear_session(query.from_user.id)
 
 def setup_handlers(app: Application):
-    """Sets up all the command and message handlers for the bot."""
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('help', help_command))
-    app.add_handler(CommandHandler('menu', menu_command))
-    app.add_handler(CommandHandler('signals', signals))
-    app.add_handler(CommandHandler('market', market))
-    app.add_handler(CommandHandler('analyze', analyze))
-    app.add_handler(CommandHandler('risk', risk))
-    app.add_handler(CommandHandler('trades', trades))
-    app.add_handler(CommandHandler('history', history))
-    app.add_handler(CommandHandler('pipcalc', pipcalc))
-    app.add_handler(CommandHandler('strategies', strategies))
-    # MT5 Trading Commands
-    app.add_handler(CommandHandler('connect', connect))
-    app.add_handler(CommandHandler('status', status))
-    app.add_handler(CommandHandler('balance', balance))
-    app.add_handler(CommandHandler('account', account))
-    app.add_handler(CommandHandler('buy', buy))
-    app.add_handler(CommandHandler('sell', sell))
-    app.add_handler(CommandHandler('positions', positions))
-    app.add_handler(CommandHandler('orders', orders))
-    app.add_handler(CommandHandler('close', close))
-    app.add_handler(CommandHandler('closeall', closeall))
-    app.add_handler(CommandHandler('price', price))
-    app.add_handler(CommandHandler('summary', summary))
-    app.add_handler(CallbackQueryHandler(handle_personal_callback))
-    app.add_handler(CallbackQueryHandler(handle_order_callback, pattern='^order_'))
-    app.add_handler(CallbackQueryHandler(handle_modify_callback, pattern='^modify_'))
-    app.add_handler(MessageHandler(TFilters.TEXT & (~TFilters.COMMAND), reply_keyboard_handler))
-    app.add_handler(CommandHandler('cancel', cancel))
-    app.add_handler(CommandHandler("orderblock", orderblock_command))
-    app.add_handler(CommandHandler("orderblock_status", orderblock_status_command))
-    app.add_handler(CommandHandler("scan_orderblocks", scan_orderblocks_command))
+    """Set up all command and message handlers."""
+    
+    # Basic commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("menu", menu_command))
+    
+    # Market analysis commands
+    app.add_handler(CommandHandler("signals", signals))
+    app.add_handler(CommandHandler("market", market))
+    app.add_handler(CommandHandler("analyze", analyze))
+    app.add_handler(CommandHandler("analyze_all", analyze_all))
+    app.add_handler(CommandHandler("signal", signal))
+    app.add_handler(CommandHandler("risk", risk))
+    app.add_handler(CommandHandler("pipcalc", pipcalc))
+    
+    # MT5 trading commands
+    app.add_handler(CommandHandler("connect", connect))
+    app.add_handler(CommandHandler("disconnect", disconnect))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("account", account))
+    app.add_handler(CommandHandler("buy", buy))
+    app.add_handler(CommandHandler("sell", sell))
+    app.add_handler(CommandHandler("positions", positions))
+    app.add_handler(CommandHandler("orders", orders))
+    app.add_handler(CommandHandler("close", close))
+    app.add_handler(CommandHandler("closeall", closeall))
+    app.add_handler(CommandHandler("price", price))
+    app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(CommandHandler("modify", modify_command))
+    
+    # Trade history commands
+    app.add_handler(CommandHandler("trades", trades))
+    app.add_handler(CommandHandler("trades_today", trades_today))
+    app.add_handler(CommandHandler("history", history))
+    
+    # Strategy commands
+    app.add_handler(CommandHandler("strategies", strategies))
+    app.add_handler(CommandHandler("orderblock", orderblock))
+    app.add_handler(CommandHandler("orderblock_status", orderblock_status))
     app.add_handler(CommandHandler("orderblock_signals", orderblock_signals))
     app.add_handler(CommandHandler("orderblock_performance", orderblock_performance))
     app.add_handler(CommandHandler("orderblock_settings", orderblock_settings))
-    app.add_handler(CommandHandler("modify", modify_command))
-    # AI Commands
+    app.add_handler(CommandHandler("scan_orderblocks", scan_orderblocks))
+    
+    # AI trading commands
     app.add_handler(CommandHandler("ai_start", ai_start_command))
     app.add_handler(CommandHandler("ai_stop", ai_stop_command))
     app.add_handler(CommandHandler("ai_status", ai_status_command))
     app.add_handler(CommandHandler("ai_config", ai_config_command))
-    app.add_handler(CallbackQueryHandler(ai_config_callback, pattern='^ai_toggle:'))
-    app.add_handler(CommandHandler("signal", signal))
-    app.add_handler(CommandHandler("disconnect", disconnect))
-    app.add_handler(CommandHandler("analyze_all", analyze_all))
+    
+    # Utility commands
+    app.add_handler(CommandHandler("cancel", cancel))
+    
+    # Callback query handlers
+    app.add_handler(CallbackQueryHandler(handle_personal_callback, pattern="^personal_"))
+    app.add_handler(CallbackQueryHandler(ai_config_callback, pattern="^ai_config_"))
+    app.add_handler(CallbackQueryHandler(handle_order_callback, pattern="^order_"))
+    app.add_handler(CallbackQueryHandler(handle_modify_callback, pattern="^modify_"))
+    
+    # Message handlers for interactive sessions
+    app.add_handler(MessageHandler(TFilters.TEXT & ~TFilters.COMMAND, reply_keyboard_handler))
 
 async def run_network_diagnostics():
     """Run comprehensive network diagnostics."""
@@ -2466,46 +2630,49 @@ async def analyze_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     pairs = signal_service.pairs_to_scan
     results = []
-    await context.bot.send_message(chat_id, "🔎 Analyzing all pairs. This may take a few moments...")
+    await context.bot.send_message(chat_id, "🔎 Analyzing all pairs using Market Structure Strategy. This may take a few moments...")
     for i, pair in enumerate(pairs):
         try:
-            df = await signal_service.fetch_ohlcv(pair, interval='60min', outputsize='compact')
+            df = await signal_service.fetch_ohlcv(pair, interval='15min', outputsize='compact')
             if df is None or len(df) < 50:
-                results.append(f"*{pair}*: _Not enough data or unavailable._")
+                results.append(f"❌ {pair}: Market data unavailable.")
                 continue
-            # Technical summary: trend, support/resistance (simple trend: last close vs. 20-period MA)
-            close = df['close']
-            ma20 = close.rolling(20).mean()
-            trend = "Bullish" if close.iloc[-1] > ma20.iloc[-1] else ("Bearish" if close.iloc[-1] < ma20.iloc[-1] else "Neutral")
-            support = df['low'].tail(20).min()
-            resistance = df['high'].tail(20).max()
-            # Indicator signals
-            rsi = df['close'].rolling(14).apply(lambda x: calculate_rsi(x).iloc[-1])
-            last_rsi = rsi.iloc[-1] if not rsi.isna().iloc[-1] else None
-            macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
-            macd_signal = macd.ewm(span=9).mean()
-            macd_signal_str = "Bullish" if macd.iloc[-1] > macd_signal.iloc[-1] else ("Bearish" if macd.iloc[-1] < macd_signal.iloc[-1] else "Neutral")
-            # Order block strategy bias
-            ob_signal = order_block_strategy.analyze_pair(df)
-            if ob_signal and ob_signal.get('signal') == 'buy':
-                bias = 'Bullish'
-            elif ob_signal and ob_signal.get('signal') == 'sell':
-                bias = 'Bearish'
+            
+            # Use Market Structure strategy
+            signal = market_structure_strategy.analyze_pair(df, pair)
+            
+            if signal:
+                trend = signal.get('trend', 'Unknown')
+                confidence = signal.get('confidence', 'N/A')
+                order_block_strength = signal.get('order_block_strength', 'N/A')
+                inducement = "✅" if signal.get('inducement_detected') else "❌"
+                
+                analysis = f"📊 **{pair}**\n"
+                analysis += f"🎯 **Signal:** {signal.get('signal', 'N/A')}\n"
+                analysis += f"📈 **Trend:** {trend}\n"
+                analysis += f"🎚️ **Confidence:** {confidence}\n"
+                analysis += f"💪 **Order Block Strength:** {order_block_strength}\n"
+                analysis += f"🎣 **Inducement:** {inducement}\n"
+                analysis += f"💰 **Entry:** {signal.get('entry_price', 'N/A')}\n"
+                analysis += f"🛑 **Stop Loss:** {signal.get('stop_loss', 'N/A')}\n"
+                analysis += f"🎯 **Take Profit:** {signal.get('take_profit', 'N/A')}\n"
+                analysis += f"📊 **Support:** {signal.get('support', 'N/A')}\n"
+                analysis += f"📈 **Resistance:** {signal.get('resistance', 'N/A')}\n"
+                analysis += f"🔍 **FVG Count:** {signal.get('fvgs_count', 'N/A')}\n"
+                analysis += f"📦 **Order Blocks:** {signal.get('order_blocks_count', 'N/A')}\n"
             else:
-                bias = trend
-            # Format summary
-            summary = f"*{pair}*\n" \
-                      f"Trend: {trend}\n" \
-                      f"Support: {support:.5f} | Resistance: {resistance:.5f}\n" \
-                      f"RSI: {last_rsi:.1f} | MACD: {macd_signal_str}\n" \
-                      f"Suggested Bias: *{bias}*\n"
-            results.append(summary)
-            await asyncio.sleep(1)  # Short delay to avoid flooding
+                analysis = f"❌ {pair}: No Market Structure signal available."
+            
+            results.append(analysis)
+            
         except Exception as e:
-            results.append(f"*{pair}*: _Analysis error: {e}_")
-    # Combine results into batches if too long
+            results.append(f"❌ {pair}: Error - {str(e)}")
+    
+    # Send results in batches to avoid flooding
     batch_size = 5
     for i in range(0, len(results), batch_size):
-        batch = results[i:i+batch_size]
-        text = '\n'.join(batch)
-        await context.bot.send_message(chat_id, text, parse_mode='Markdown')
+        batch = results[i:i + batch_size]
+        message = "\n\n".join(batch)
+        await context.bot.send_message(chat_id, message, parse_mode='Markdown')
+        if i + batch_size < len(results):
+            await asyncio.sleep(1)  # Short delay between batches

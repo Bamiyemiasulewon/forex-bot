@@ -98,6 +98,9 @@ async def get_signals():
 async def get_trades():
     """Get trade history."""
     try:
+        import datetime
+        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        
         # Mock trades data
         trades = [
             {
@@ -106,7 +109,8 @@ async def get_trades():
                 "entry_price": "1.0855",
                 "close_price": "1.0880",
                 "status": "closed",
-                "pnl": 25.0
+                "pnl": 25.0,
+                "open_time": f"{today_str} 09:00:00"
             },
             {
                 "symbol": "GBPUSD",
@@ -114,7 +118,8 @@ async def get_trades():
                 "entry_price": "1.2655",
                 "close_price": None,
                 "status": "open",
-                "pnl": 0.0
+                "pnl": 0.0,
+                "open_time": f"{today_str} 10:00:00"
             },
             {
                 "symbol": "USDJPY",
@@ -122,7 +127,17 @@ async def get_trades():
                 "entry_price": "150.55",
                 "close_price": "150.80",
                 "status": "closed",
-                "pnl": 25.0
+                "pnl": 25.0,
+                "open_time": f"{today_str} 11:00:00"
+            },
+            {
+                "symbol": "EURUSD",
+                "order_type": "buy",
+                "entry_price": "1.18000",
+                "close_price": "1.18500",
+                "status": "closed",
+                "pnl": 50.0,
+                "open_time": f"{today_str} 10:00:00"
             }
         ]
         logger.info(f"Returning {len(trades)} trades")

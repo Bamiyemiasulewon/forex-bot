@@ -4,11 +4,15 @@ import logging
 import pandas as pd
 import pandas_ta as ta
 import datetime
+from typing import Dict
 
 from .ai_config import AIConfig
 from .ai_risk_manager import AIRiskManager
 from .mt5_service import MT5Service
 from .telegram_notifier import AITelegramNotifier # We will create this next
+from app.services.market_structure_strategy import market_structure_strategy
+from app.services.signal_service import signal_service
+from app.services.market_service import market_service
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,10 @@ class AITradingService:
         self.is_running = False
         self.active_symbols = {} # To store dataframes
         self.mt5_alert_sent = False  # Track if MT5 not connected alert was sent
+        
+        # Initialize services
+        self.signal_service = signal_service
+        self.market_service = market_service
 
     async def start(self):
         """Starts the AI trading bot main loop."""
@@ -60,39 +68,66 @@ class AITradingService:
                     logger.error(f"Failed to reset daily counters: {e}")
 
     async def _run_cycle(self):
-        """The main trading loop that runs periodically."""
+        """Main trading cycle that runs continuously."""
         while self.is_running:
             try:
-                # Only trade Monday to Friday (broker/server time)
+                # Check if it's a trading day (Monday to Friday)
                 now = await self.mt5.get_server_time()
-                if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
-                    logger.info("Weekend detected (broker/server time). AI trading paused.")
-                    await asyncio.sleep(self.config.LOOP_INTERVAL_SECONDS)
+                if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
+                    logger.info("Weekend detected. AI trading paused.")
+                    await asyncio.sleep(3600)  # Sleep for 1 hour
                     continue
-                logger.info("AI cycle starting...")
-                if not self.mt5.connected:
-                    logger.warning("MT5 not connected, skipping cycle.")
-                    if not self.mt5_alert_sent:
-                        await self.notifier.send_error_notification("MT5 is not connected. AI trading is paused.")
-                        self.mt5_alert_sent = True
-                    await asyncio.sleep(self.config.LOOP_INTERVAL_SECONDS)
+
+                # Restrict trading to 7am-8pm only (server/broker time)
+                if not (7 <= now.hour <= 20):
+                    logger.info("Outside allowed trading hours (7:00-20:59). AI trading paused.")
+                    await asyncio.sleep(600)  # Sleep for 10 minutes
                     continue
-                # Reset alert flag if MT5 is now connected
-                if self.mt5_alert_sent:
-                    self.mt5_alert_sent = False
-                for symbol in self.config.SYMBOLS:
+
+                # Check and close existing trades based on Market Structure signals
+                await self._check_and_close_trades()
+
+                # Get all available pairs
+                pairs = self.risk_manager.get_all_pairs()
+                
+                # Filter pairs that haven't been traded today
+                available_pairs = [pair for pair in pairs if self.risk_manager.can_trade_pair_today(pair)]
+                
+                if not available_pairs:
+                    logger.info("All pairs have been traded today. Waiting for next trading day.")
+                    await asyncio.sleep(300)  # Sleep for 5 minutes
+                    continue
+
+                # Check daily trade limit
+                if self.risk_manager.daily_trade_count >= self.config.MAX_DAILY_TRADES:
+                    logger.info(f"Daily trade limit of {self.config.MAX_DAILY_TRADES} reached. Waiting for next trading day.")
+                    await asyncio.sleep(300)  # Sleep for 5 minutes
+                    continue
+
+                # Analyze and trade available pairs
+                for symbol in available_pairs:
+                    if not self.is_running:
+                        break
+                    
                     await self._analyze_and_trade(symbol)
-                logger.info(f"AI cycle finished. Waiting for {self.config.LOOP_INTERVAL_SECONDS} seconds.")
-                await asyncio.sleep(self.config.LOOP_INTERVAL_SECONDS)
+                    await asyncio.sleep(30)  # Wait 30 seconds between pairs
+
+                # Wait before next cycle
+                await asyncio.sleep(60)  # 1 minute between cycles
+
             except Exception as e:
-                logger.error(f"An error occurred in the AI trading cycle: {e}", exc_info=True)
-                await self.notifier.send_error_notification(f"AI cycle failed: {e}")
-                await asyncio.sleep(60) # Wait longer after an error
+                logger.error(f"Error in AI trading cycle: {e}", exc_info=True)
+                await asyncio.sleep(60)
 
     async def _analyze_and_trade(self, symbol: str):
-        """Analyzes a single symbol and executes a trade if conditions are met."""
-        logger.info(f"Analyzing {symbol}...")
-        
+        """Analyzes a single symbol and executes a trade if conditions are met, using the custom Market Structure strategy only."""
+        logger.info(f"Analyzing {symbol} with Market Structure strategy...")
+
+        # 0. Check if pair has been traded today (only one trade per pair per day)
+        if not self.risk_manager.can_trade_pair_today(symbol):
+            logger.info(f"Pair {symbol} already traded today. Skipping.")
+            return
+
         # 0. Coexistence & Safety Checks
         all_positions = await self.mt5.get_positions()
         if len(all_positions) >= self.config.MAX_TOTAL_OPEN_TRADES:
@@ -102,91 +137,196 @@ class AITradingService:
         # Per-pair daily loss prevention
         balance_info = await self.mt5.get_balance()
         if not balance_info:
-            logger.error("Could not fetch account balance. Cannot execute trade.")
+            logger.warning("Could not fetch balance info for risk check.")
             return
-        balance = balance_info['balance']
-        # Set per-pair daily loss threshold (e.g., 2% of balance)
-        pair_loss_limit = balance * 0.02
-        pair_loss = self.risk_manager.daily_pair_pnl.get(symbol, 0.0)
-        if pair_loss < 0 and abs(pair_loss) >= pair_loss_limit:
-            logger.warning(f"Daily loss limit reached for {symbol}: {pair_loss:.2f} >= {pair_loss_limit:.2f}. No more trades for this pair today.")
+        
+        balance = balance_info.get('balance', 0)
+        daily_pair_loss = self.risk_manager.daily_pair_pnl.get(symbol, 0)
+        max_daily_loss_per_pair = balance * 0.02  # 2% of balance
+        
+        if daily_pair_loss < -max_daily_loss_per_pair:
+            logger.warning(f"Daily loss limit reached for {symbol}. Skipping trade.")
             return
 
-        if self.config.AVOID_OPPOSING_MANUAL_TRADES:
-            manual_positions_on_symbol = await self.mt5.get_positions(symbol=symbol, magic_number=self.config.MANUAL_MAGIC_NUMBER)
-            if manual_positions_on_symbol:
-                logger.info(f"Detected manual trade on {symbol}. AI will not trade this symbol to avoid conflict.")
+        # 1. Fetch Market Data for all required timeframes
+        # M15 or H1 for market structure
+        df_m15 = await self.signal_service.fetch_ohlcv(symbol, interval='15min', outputsize='compact')
+        df_h1 = await self.signal_service.fetch_ohlcv(symbol, interval='60min', outputsize='compact')
+        # M5 or M1 for POI
+        df_m5 = await self.signal_service.fetch_ohlcv(symbol, interval='5min', outputsize='compact')
+        df_m1 = await self.signal_service.fetch_ohlcv(symbol, interval='1min', outputsize='compact')
+        # M3 for inducement (if available)
+        try:
+            df_m3 = await self.signal_service.fetch_ohlcv(symbol, interval='3min', outputsize='compact')
+        except Exception:
+            df_m3 = None
+
+        # Use the main strategy analyzer (which combines all these)
+        # Pass the most granular data (M1) for entry logic
+        df_for_analysis = df_m1 if df_m1 is not None and len(df_m1) >= 50 else df_m15
+        if df_for_analysis is None or len(df_for_analysis) < 50:
+            logger.warning(f"Insufficient market data for {symbol}")
+            return
+
+        # 2. Market Structure Analysis (uses all timeframes internally)
+        market_structure_signal = market_structure_strategy.analyze_pair(df_for_analysis, symbol)
+        if not market_structure_signal:
+            logger.info(f"No Market Structure signal for {symbol}")
+            return
+
+        signal_type = market_structure_signal.get('signal')
+        if not signal_type:
+            logger.warning(f"No valid signal type for {symbol}")
+            return
+
+        # 3. Risk Management Check
+        if not self.risk_manager.can_trade():
+            logger.warning(f"Risk management blocked trade for {symbol}")
+            return
+
+        # 4. Position Size Calculation
+        entry_price = market_structure_signal.get('entry_price')
+        stop_loss = market_structure_signal.get('stop_loss')
+        
+        if not entry_price or not stop_loss:
+            logger.warning(f"Missing entry or stop loss price for {symbol}")
+            return
+
+        # Calculate position size based on risk
+        risk_amount = balance * self.config.RISK_PER_TRADE
+        pip_value = await self.market_service.get_pip_value_in_usd(symbol, 0.01)  # 0.01 lot
+        stop_loss_pips = abs(entry_price - stop_loss) / 0.0001  # Convert to pips
+        
+        if pip_value <= 0 or stop_loss_pips <= 0:
+            logger.warning(f"Invalid pip value or stop loss for {symbol}")
+            return
+
+        position_size = risk_amount / (pip_value * stop_loss_pips)
+        position_size = min(position_size, self.config.MAX_POSITION_SIZE)
+        position_size = max(position_size, self.config.MIN_POSITION_SIZE)
+
+        # 5. Execute Trade
+        try:
+            order_type = "buy" if signal_type == "BUY" else "sell"
+            take_profit = market_structure_signal.get('take_profit')
+            
+            # Convert pips to price for SL/TP
+            sl_pips = abs(entry_price - stop_loss) / 0.0001
+            tp_pips = abs(entry_price - take_profit) / 0.0001 if take_profit else None
+            
+            result = await self.mt5.place_order(
+                symbol=symbol,
+                order_type=order_type,
+                lot=position_size,
+                sl_pips=sl_pips,
+                tp_pips=tp_pips
+            )
+            if result.get('success'):
+                logger.info(f"Trade placed for {symbol}: {order_type} {position_size} lots at {entry_price}")
+                await self._send_trade_notification(symbol, order_type, position_size, entry_price, stop_loss, take_profit, market_structure_signal)
+                # Send user alert/notification as soon as trade is placed
+                if hasattr(self, 'notifier') and self.notifier:
+                    trade_info = {
+                        'symbol': symbol,
+                        'type': order_type,
+                        'lot_size': position_size,
+                        'entry_price': entry_price,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'risk_amount': risk_amount,
+                        'balance': balance,
+                        'profit_target': market_structure_signal.get('take_profit', 0)
+                    }
+                    await self.notifier.send_trade_opened_notification(trade_info)
+            else:
+                logger.error(f"Failed to place trade for {symbol}: {result}")
+        except Exception as e:
+            logger.error(f"Error placing trade for {symbol}: {e}")
+
+    async def _check_and_close_trades(self):
+        """Check existing trades and close them based on Market Structure strategy signals."""
+        try:
+            positions = await self.mt5.get_positions()
+            if not positions:
                 return
 
-        # 1. Fetch Market Data
-        df = await self.mt5.get_candles(symbol, self.config.TIMEFRAME, self.config.CANDLE_COUNT)
-        if df is None or df.empty:
-            logger.warning(f"Could not fetch data for {symbol}.")
-            return
+            for position in positions:
+                symbol = position.get('symbol')
+                if not symbol:
+                    continue
 
-        # 2. Calculate Indicators
-        df.ta.rsi(length=self.config.RSI_PERIOD, append=True)
-        df.ta.macd(fast=self.config.MA_FAST_PERIOD, slow=self.config.MA_SLOW_PERIOD, signal=self.config.MACD_SIGNAL_PERIOD, append=True)
-        
-        # 3. Generate Signal (Simplified logic for now)
-        # In a real scenario, this logic would be much more complex, using the AI Decision Matrix.
-        last_candle = df.iloc[-1]
-        signal = None
-        if last_candle[f'RSI_{self.config.RSI_PERIOD}'] < 30 and last_candle[f'MACD_12_26_9'] > last_candle[f'MACDs_12_26_9']:
-            signal = "BUY"
-        elif last_candle[f'RSI_{self.config.RSI_PERIOD}'] > 70 and last_candle[f'MACD_12_26_9'] < last_candle[f'MACDs_12_26_9']:
-            signal = "SELL"
-        
-        if not signal:
-            logger.info(f"No clear signal for {symbol}.")
-            return
+                # Fetch current market data
+                df = await self.signal_service.fetch_ohlcv(symbol, interval='15min', outputsize='compact')
+                if df is None or len(df) < 50:
+                    continue
 
-        # 4. Execute Trade
-        logger.info(f"Signal '{signal}' generated for {symbol}. Proceeding to execution.")
-        
-        balance_info = await self.mt5.get_balance()
-        if not balance_info:
-            logger.error("Could not fetch account balance. Cannot execute trade.")
-            return
+                # Get current Market Structure signal
+                current_signal = market_structure_strategy.analyze_pair(df, symbol)
+                if not current_signal:
+                    continue
 
-        position_size = await self.risk_manager.calculate_position_size(balance_info['balance'], symbol)
-        if position_size <= 0:
-            logger.warning(f"Position size is 0 for {symbol}. Skipping trade.")
-            return
+                current_signal_type = current_signal.get('signal')
+                position_type = position.get('type', '').lower()
 
-        sl_pips = self.config.get_stop_loss(symbol)
-        tp_pips = self.config.get_take_profit(symbol)
+                # Check if we should close the position based on signal reversal
+                should_close = False
+                close_reason = ""
 
-        # 5. Handle Shadow Mode
-        if self.config.SHADOW_MODE:
-            logger.info(f"[SHADOW MODE] Would place {signal} order for {symbol} at {position_size} lots.")
-            await self.notifier.send_shadow_trade_notification({
-                "symbol": symbol, "type": signal, "lot_size": position_size
-            })
-            return # Do not proceed to actual trade placement
+                if position_type == 'buy' and current_signal_type == 'SELL':
+                    should_close = True
+                    close_reason = "Market Structure signal reversal to SELL"
+                elif position_type == 'sell' and current_signal_type == 'BUY':
+                    should_close = True
+                    close_reason = "Market Structure signal reversal to BUY"
 
-        # 6. Execute Live Trade
-        result = await self.mt5.place_order(
-            symbol=symbol,
-            lot=position_size,
-            order_type=signal.lower(),
-            sl_pips=sl_pips,
-            tp_pips=tp_pips,
-            magic_number=self.config.AI_MAGIC_NUMBER
-        )
+                # Additional close conditions based on Market Structure
+                if current_signal.get('trend') == 'ranging':
+                    # Close if market structure shows ranging (no clear trend)
+                    should_close = True
+                    close_reason = "Market structure shows ranging conditions"
 
-        if result and result.get("success"):
-            self.risk_manager.record_trade_opened(pair=symbol)
-            trade_info = {
-                "symbol": symbol,
-                "type": signal,
-                "balance": balance_info['balance'],
-                "risk_amount": balance_info['balance'] * (self.config.RISK_PER_TRADE_PERCENT / 100),
-                "profit_target": balance_info['balance'] * (self.config.RISK_PER_TRADE_PERCENT / 100) * self.config.RISK_REWARD_RATIO,
-                "ticket": result.get("ticket")
-            }
-            await self.notifier.send_trade_opened_notification(trade_info)
-        else:
-            error_msg = result.get("error", "Unknown error")
-            logger.error(f"Failed to place order for {symbol}: {error_msg}")
-            await self.notifier.send_error_notification(f"Trade failed for {symbol}: {error_msg}") 
+                if should_close:
+                    ticket = position.get('ticket')
+                    if ticket:
+                        close_result = await self.mt5.close_position(ticket)
+                        if close_result.get('success'):
+                            logger.info(f"✅ AI closed {symbol} position: {close_reason}")
+                            await self._send_close_notification(symbol, close_reason, position)
+                        else:
+                            logger.error(f"❌ Failed to close {symbol} position: {close_result}")
+
+        except Exception as e:
+            logger.error(f"Error in trade close check: {e}", exc_info=True)
+
+    async def _send_close_notification(self, symbol: str, reason: str, position: Dict):
+        """Send notification when AI closes a trade."""
+        try:
+            message = f"🤖 **AI Trade Closed**\n"
+            message += f"📊 **Symbol:** {symbol}\n"
+            message += f"📝 **Reason:** {reason}\n"
+            message += f"💰 **Profit/Loss:** {position.get('profit', 'N/A')}\n"
+            message += f"📅 **Time:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # Send to Telegram if notifier is available
+            if hasattr(self, 'notifier') and self.notifier:
+                await self.notifier.send_message(message)
+        except Exception as e:
+            logger.error(f"Error sending close notification: {e}")
+
+    async def _send_trade_notification(self, symbol: str, order_type: str, position_size: float, entry_price: float, stop_loss: float, take_profit: float, market_structure_signal: Dict):
+        """Send notification when AI places a trade."""
+        try:
+            message = f"🤖 **AI Trade Placed**\n"
+            message += f"📊 **Symbol:** {symbol}\n"
+            message += f"📝 **Order Type:** {order_type.upper()}\n"
+            message += f"💰 **Position Size:** {position_size}\n"
+            message += f"📅 **Entry Price:** {entry_price}\n"
+            message += f"📅 **Stop Loss:** {stop_loss}\n"
+            message += f"📅 **Take Profit:** {take_profit}\n"
+            message += f"📊 **Market Structure Signal:** {market_structure_signal}"
+            
+            # Send to Telegram if notifier is available
+            if hasattr(self, 'notifier') and self.notifier:
+                await self.notifier.send_message(message)
+        except Exception as e:
+            logger.error(f"Error sending trade notification: {e}") 

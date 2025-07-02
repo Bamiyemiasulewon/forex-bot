@@ -246,6 +246,9 @@ async def get_trades(db=Depends(get_db_dependency)):
         # Get all trades from database
         trades = db.query(Trade).order_by(Trade.created_at.desc()).limit(20).all()
         
+        import datetime
+        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        
         trade_list = []
         for trade in trades:
             trade_list.append({
@@ -254,7 +257,8 @@ async def get_trades(db=Depends(get_db_dependency)):
                 "entry_price": str(trade.entry_price),
                 "close_price": str(trade.close_price) if trade.close_price else None,
                 "status": trade.status,
-                "pnl": trade.pnl if trade.pnl else 0.0
+                "pnl": trade.pnl if trade.pnl else 0.0,
+                "open_time": f"{today_str} {trade.created_at.strftime('%H:%M:%S')}" if trade.created_at else f"{today_str} 12:00:00"
             })
         
         logger.info(f"Returning {len(trade_list)} trades from database")

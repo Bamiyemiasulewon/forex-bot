@@ -2,7 +2,7 @@
 import logging
 import json
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from .ai_config import AIConfig
 from .mt5_service import MT5Service
@@ -22,6 +22,7 @@ class AIRiskManager:
         self.daily_pnl = 0.0
         self.daily_pair_trade_count = {}  # {pair: count}
         self.daily_pair_pnl = {}  # {pair: pnl}
+        self.daily_pair_traded = {}  # {pair: True/False} - tracks if pair was traded today
         self.load_state()
 
     def _get_state(self) -> Dict[str, Any]:
@@ -30,7 +31,8 @@ class AIRiskManager:
             "daily_trade_count": self.daily_trade_count,
             "daily_pnl": self.daily_pnl,
             "daily_pair_trade_count": self.daily_pair_trade_count,
-            "daily_pair_pnl": self.daily_pair_pnl
+            "daily_pair_pnl": self.daily_pair_pnl,
+            "daily_pair_traded": self.daily_pair_traded
         }
 
     def save_state(self):
@@ -55,18 +57,47 @@ class AIRiskManager:
                 self.daily_pnl = state.get("daily_pnl", 0.0)
                 self.daily_pair_trade_count = state.get("daily_pair_trade_count", {})
                 self.daily_pair_pnl = state.get("daily_pair_pnl", {})
+                self.daily_pair_traded = state.get("daily_pair_traded", {})
                 logger.info("AI risk state loaded successfully.")
         except (IOError, json.JSONDecodeError) as e:
             logger.error(f"Error loading AI state, starting fresh: {e}")
 
     def reset_daily_counters(self):
-        """Resets the daily trade counters and P&L, including per-pair stats."""
+        """Resets all daily counters and pair tracking."""
         self.daily_trade_count = 0
         self.daily_pnl = 0.0
         self.daily_pair_trade_count = {}
         self.daily_pair_pnl = {}
-        logger.info("Daily risk counters have been reset.")
+        self.daily_pair_traded = {}  # Reset daily pair trading status
         self.save_state()
+        logger.info("🔄 Daily counters and pair tracking reset.")
+
+    def can_trade_pair_today(self, pair: str) -> bool:
+        """Check if a specific pair can be traded today (only one trade per pair per day)."""
+        return not self.daily_pair_traded.get(pair, False)
+
+    def mark_pair_traded_today(self, pair: str):
+        """Mark a pair as traded today to prevent multiple trades on the same pair."""
+        self.daily_pair_traded[pair] = True
+        self.save_state()
+        logger.info(f"✅ {pair} marked as traded today.")
+
+    def get_daily_pair_status(self) -> Dict[str, Any]:
+        """Get status of all pairs for today."""
+        return {
+            "daily_trade_count": self.daily_trade_count,
+            "daily_pnl": self.daily_pnl,
+            "pairs_traded_today": list(self.daily_pair_traded.keys()),
+            "pairs_available_today": [pair for pair in self.get_all_pairs() if not self.daily_pair_traded.get(pair, False)],
+            "daily_pair_pnl": self.daily_pair_pnl
+        }
+
+    def get_all_pairs(self) -> List[str]:
+        """Get list of all trading pairs."""
+        return [
+            "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
+            "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURCHF", "XAUUSD"
+        ]
 
     async def calculate_position_size(self, balance: float, symbol: str) -> float:
         """

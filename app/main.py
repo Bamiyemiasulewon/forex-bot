@@ -97,6 +97,9 @@ async def get_signals():
 @app.get("/api/trades")
 async def get_trades():
     """Mock trades endpoint for testing."""
+    import datetime
+    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    
     return [
         {
             "symbol": "EURUSD",
@@ -104,7 +107,8 @@ async def get_trades():
             "entry_price": "1.0855",
             "close_price": "1.0880",
             "status": "closed",
-            "pnl": 25.0
+            "pnl": 25.0,
+            "open_time": f"{today_str} 09:00:00"
         },
         {
             "symbol": "GBPUSD",
@@ -112,7 +116,8 @@ async def get_trades():
             "entry_price": "1.2655",
             "close_price": None,
             "status": "open",
-            "pnl": 0.0
+            "pnl": 0.0,
+            "open_time": f"{today_str} 10:00:00"
         }
     ]
 

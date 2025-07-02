@@ -2,7 +2,7 @@ import pandas as pd
 from app.utils.indicators import calculate_rsi
 from typing import List, Dict, Optional
 from app.services.market_service import market_service
-from app.services.order_block_strategy import order_block_strategy
+from app.services.market_structure_strategy import market_structure_strategy
 import asyncio
 import logging
 import httpx
@@ -16,7 +16,7 @@ class SignalService:
         # Expanded list of major forex pairs to generate signals for (no slashes)
         self.pairs_to_scan = [
             "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
-            "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURCHF"
+            "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURCHF", "XAUUSD"
         ]
         self.alpha_vantage_api_key = ALPHA_VANTAGE_API_KEY
         self.base_url = "https://www.alphavantage.co/query"
@@ -139,10 +139,10 @@ class SignalService:
             return signals
 
     async def analyze_pair_for_signal(self, pair: str) -> Optional[Dict]:
-        """Analyzes a single pair and returns a signal if conditions are met for either strategy."""
+        """Analyzes a single pair and returns a signal if conditions are met for Market Structure strategy."""
         try:
-            # Fetch historical data (e.g., 1-hour timeframe for the last 100 hours)
-            df = await self.fetch_ohlcv(pair, interval='60min', outputsize='compact')
+            # Fetch historical data (e.g., 15-minute timeframe for market structure analysis)
+            df = await self.fetch_ohlcv(pair, interval='15min', outputsize='compact')
             if df is None or len(df) < 50:
                 logger.info(f"Not enough historical data for {pair}, skipping.")
                 return None
@@ -154,23 +154,17 @@ class SignalService:
                 return None
             current_price = ticker['price']
             
-            # Try Order Block + RSI + Fibonacci strategy first (higher priority)
-            order_block_signal = order_block_strategy.analyze_pair(df)
-            if order_block_signal:
+            # Use Market Structure strategy (new strategy)
+            market_structure_signal = market_structure_strategy.analyze_pair(df, pair)
+            if market_structure_signal:
                 # Add current price and pair info
-                order_block_signal.update({
+                market_structure_signal.update({
                     'pair': pair,
                     'current_price': current_price,
                     'priority': 'high'
                 })
-                logger.info(f"Order Block signal generated for {pair}: {order_block_signal['signal']}")
-                return order_block_signal
-            
-            # Fallback to RSI strategy if no Order Block signal
-            rsi_signal = await self._analyze_rsi_strategy(df, pair, current_price)
-            if rsi_signal:
-                rsi_signal['priority'] = 'medium'
-                return rsi_signal
+                logger.info(f"Market Structure signal generated for {pair}: {market_structure_signal['signal']}")
+                return market_structure_signal
             
             return None
         except RuntimeError as e:
@@ -227,13 +221,8 @@ class SignalService:
     def get_strategy_status(self) -> Dict:
         """Get status of all available strategies."""
         return {
-            "order_block_strategy": order_block_strategy.get_strategy_info(),
-            "rsi_strategy": {
-                "name": "RSI Overbought/Oversold",
-                "timeframe": "1H",
-                "conditions": "RSI > 75 (sell) or RSI < 25 (buy)",
-                "risk_reward": "1:2"
-            }
+            "market_structure_strategy": market_structure_strategy.get_strategy_info(),
+            "description": "Market Structure Strategy using multiple timeframes for trend analysis, POI detection, inducement identification, and FVG-based exits."
         }
 
     async def get_signal_for_pair(self, pair: str) -> Optional[Dict]:
