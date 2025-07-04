@@ -5,6 +5,8 @@ import pandas as pd
 import pandas_ta as ta
 import datetime
 from typing import Dict
+import time
+from app.utils.indicators import calculate_rsi, calculate_macd
 
 from .ai_config import AIConfig
 from .ai_risk_manager import AIRiskManager
@@ -32,6 +34,17 @@ class AITradingService:
         # Initialize services
         self.signal_service = signal_service
         self.market_service = market_service
+        self.last_confidence_trade_time = 0
+        self.confidence_cooldown = 60 * 30  # 30 minutes cooldown for confidence strategy
+        self.confidence_trade_log = []
+        self.confidence_weights = {
+            'rsi': 0.4,
+            'macd': 0.4,
+            'session': 0.2
+        }
+        self.confidence_threshold = 0.7  # 70%
+        self.confidence_traded_pairs_today = set()
+        self.confidence_last_reset = datetime.datetime.now().date()
 
     async def start(self):
         """Starts the AI trading bot main loop."""
@@ -64,6 +77,11 @@ class AITradingService:
                 try:
                     self.risk_manager.reset_daily_counters()
                     logger.info("Daily trade counters reset at midnight broker/server time.")
+                    # Reset confidence strategy tracking at midnight
+                    self.confidence_traded_pairs_today.clear()
+                    self.confidence_last_reset = datetime.datetime.now().date()
+                    logger.info("Confidence strategy tracking reset at midnight.")
+                    self.write_confidence_daily_log()
                 except Exception as e:
                     logger.error(f"Failed to reset daily counters: {e}")
 
@@ -99,11 +117,16 @@ class AITradingService:
                     continue
 
                 # Analyze and trade available pairs
+                today = datetime.datetime.now().date()
+                if today != self.confidence_last_reset:
+                    self.confidence_traded_pairs_today.clear()
+                    self.confidence_last_reset = today
                 for symbol in available_pairs:
                     if not self.is_running:
                         break
                     
                     await self._analyze_and_trade(symbol)
+                    await self.analyze_with_confidence_strategy(symbol)
                     await asyncio.sleep(30)  # Wait 30 seconds between pairs
 
                 # Wait before next cycle
@@ -247,6 +270,114 @@ class AITradingService:
                 logger.error(f"Failed to place trade for {symbol}: {result}")
         except Exception as e:
             logger.error(f"Error placing trade for {symbol}: {e}")
+
+    async def analyze_with_confidence_strategy(self, symbol: str):
+        """
+        New, less strict strategy: aggregate indicators with weights, use OR logic, dynamic lot sizing, session filter, cooldown, and logging.
+        """
+        now = datetime.datetime.now()
+        # Only trade during London/NY sessions (8:00-17:00 UTC, can be adjusted)
+        if not (8 <= now.hour < 17):
+            logger.info(f"[CONF] {symbol}: Outside London/NY session. Skipping.")
+            return
+        # Cooldown check
+        if time.time() - self.last_confidence_trade_time < self.confidence_cooldown:
+            logger.info(f"[CONF] {symbol}: Cooldown active. Skipping.")
+            return
+        # Check if already traded today
+        if symbol in self.confidence_traded_pairs_today:
+            logger.info(f"[CONF] {symbol}: Already traded today. Skipping.")
+            return
+        # Fetch data
+        df = await self.signal_service.fetch_ohlcv(symbol, interval='15min', outputsize='compact')
+        if df is None or len(df) < 50:
+            logger.info(f"[CONF] {symbol}: Not enough data.")
+            return
+        close = df['close']
+        # Calculate indicators
+        rsi = calculate_rsi(close)
+        last_rsi = rsi.iloc[-1]
+        macd, macd_signal = calculate_macd(close)
+        last_macd = macd.iloc[-1]
+        last_macd_signal = macd_signal.iloc[-1]
+        # Indicator signals (OR logic)
+        rsi_signal = last_rsi < 30 or last_rsi > 70
+        macd_signal_bool = (last_macd > last_macd_signal) or (last_macd < last_macd_signal)
+        session_signal = 8 <= now.hour < 17
+        # Assign weights and calculate confidence
+        weighted_sum = (
+            self.confidence_weights['rsi'] * int(rsi_signal) +
+            self.confidence_weights['macd'] * int(macd_signal_bool) +
+            self.confidence_weights['session'] * int(session_signal)
+        )
+        # Trigger trade if above threshold
+        if weighted_sum >= self.confidence_threshold:
+            # Dynamic lot sizing based on balance and confidence
+            balance_info = await self.mt5.get_balance()
+            balance = balance_info.get('balance', 0) if balance_info else 0
+            base_lot = 0.01
+            lot = base_lot + (weighted_sum - self.confidence_threshold) * 0.05  # More confidence, bigger lot
+            lot = min(max(lot, 0.01), 1.0)
+            # Direction
+            if last_rsi < 30 or (last_macd > last_macd_signal):
+                order_type = 'buy'
+            elif last_rsi > 70 or (last_macd < last_macd_signal):
+                order_type = 'sell'
+            else:
+                logger.info(f"[CONF] {symbol}: No clear direction.")
+                return
+            # Place trade
+            price = close.iloc[-1]
+            stop_loss = price * (0.995 if order_type == 'buy' else 1.005)
+            take_profit = price * (1.01 if order_type == 'buy' else 0.99)
+            result = await self.mt5.place_order(
+                symbol=symbol,
+                order_type=order_type,
+                lot=lot,
+                sl_pips=abs(price - stop_loss) / 0.0001,
+                tp_pips=abs(price - take_profit) / 0.0001
+            )
+            if result.get('success'):
+                self.last_confidence_trade_time = time.time()
+                self.confidence_traded_pairs_today.add(symbol)
+                log_entry = {
+                    'timestamp': now.isoformat(),
+                    'symbol': symbol,
+                    'order_type': order_type,
+                    'lot': lot,
+                    'confidence': weighted_sum,
+                    'rsi': last_rsi,
+                    'macd': last_macd,
+                    'macd_signal': last_macd_signal
+                }
+                self.confidence_trade_log.append(log_entry)
+                logger.info(f"[CONF] Trade placed: {log_entry}")
+            else:
+                logger.error(f"[CONF] Failed to place trade for {symbol}: {result}")
+        else:
+            logger.info(f"[CONF] {symbol}: Confidence {weighted_sum:.2f} below threshold.")
+
+    def tune_confidence_strategy(self, past_trades):
+        """
+        Placeholder: Use past trade data to tune indicator weights and confidence threshold.
+        In production, this could use grid search, Bayesian optimization, or reinforcement learning.
+        """
+        # Example: Adjust weights based on win rate of each indicator
+        # For now, just log that tuning would happen here
+        logger.info("[CONF] Tuning confidence strategy weights and threshold using past data (not implemented).")
+        # Example: self.confidence_weights['rsi'] = new_value
+        # Example: self.confidence_threshold = new_threshold
+
+    def write_confidence_daily_log(self):
+        """
+        Write daily log of confidence-based trades to a file.
+        """
+        today = datetime.datetime.now().strftime('%Y-%m-%d')
+        filename = f'confidence_trades_{today}.log'
+        with open(filename, 'a') as f:
+            for entry in self.confidence_trade_log:
+                f.write(str(entry) + '\n')
+        self.confidence_trade_log.clear()
 
     def _get_spread(self, symbol):
         """Placeholder: Returns the current spread in pips for the symbol. Replace with real implementation."""
