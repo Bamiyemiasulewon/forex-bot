@@ -684,8 +684,19 @@ async def trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today_trades = []
         for trade in data:
             trade_date = trade.get('open_time', '')
-            if isinstance(trade_date, str) and today_str in trade_date:
-                today_trades.append(trade)
+            try:
+                # Parse open_time as datetime and compare date part
+                trade_dt = None
+                if isinstance(trade_date, str):
+                    from dateutil import parser
+                    trade_dt = parser.parse(trade_date)
+                elif isinstance(trade_date, (int, float)):
+                    from datetime import datetime
+                    trade_dt = datetime.fromtimestamp(trade_date)
+                if trade_dt and trade_dt.date() == today.date():
+                    today_trades.append(trade)
+            except Exception:
+                continue
         
         if not today_trades:
             response = f"📊 **Today's Trades ({today_str})**\n\n"
@@ -760,8 +771,19 @@ async def trades_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today_trades = []
         for trade in data:
             trade_date = trade.get('open_time', '')
-            if isinstance(trade_date, str) and today_str in trade_date:
-                today_trades.append(trade)
+            try:
+                # Parse open_time as datetime and compare date part
+                trade_dt = None
+                if isinstance(trade_date, str):
+                    from dateutil import parser
+                    trade_dt = parser.parse(trade_date)
+                elif isinstance(trade_date, (int, float)):
+                    from datetime import datetime
+                    trade_dt = datetime.fromtimestamp(trade_date)
+                if trade_dt and trade_dt.date() == today.date():
+                    today_trades.append(trade)
+            except Exception:
+                continue
         
         response = f"📊 **Today's Trading Status ({today_str})**\n\n"
         

@@ -35,14 +35,14 @@ class AITradingService:
         self.signal_service = signal_service
         self.market_service = market_service
         self.last_confidence_trade_time = 0
-        self.confidence_cooldown = 60 * 30  # 30 minutes cooldown for confidence strategy
+        self.confidence_cooldown = 60 * 10  # 10 minutes cooldown for confidence strategy
         self.confidence_trade_log = []
         self.confidence_weights = {
             'rsi': 0.4,
             'macd': 0.4,
             'session': 0.2
         }
-        self.confidence_threshold = 0.7  # 70%
+        self.confidence_threshold = 0.45  # 45%
         self.confidence_traded_pairs_today = set()
         self.confidence_last_reset = datetime.datetime.now().date()
 
@@ -148,13 +148,13 @@ class AITradingService:
         if now.weekday() == 4 and now.hour >= 18:
             logger.info("Friday after 18:00. No trading allowed.")
             return
-        # Trading hours restriction: only trade between 7am and 7pm
-        if not (7 <= now.hour < 19):
-            logger.info("Outside allowed trading hours (7:00-18:59). Skipping trade.")
+        # Trading hours restriction: only trade between 7am and 9pm
+        if not (7 <= now.hour < 21):
+            logger.info("Outside allowed trading hours (7:00-20:59). Skipping trade.")
             return
         # Spread/slippage/volatility checks (placeholders)
         spread = self._get_spread(symbol)
-        if spread is not None and spread > 2.0:
+        if spread is not None and spread > 3.0:
             logger.info(f"Spread too wide for {symbol}: {spread} pips. Skipping trade.")
             return
         # Only one trade per pair per day
@@ -188,14 +188,18 @@ class AITradingService:
             df_m3 = await self.signal_service.fetch_ohlcv(symbol, interval='3min', outputsize='compact')
         except Exception:
             df_m3 = None
-        df_for_analysis = df_m1 if df_m1 is not None and len(df_m1) >= 50 else df_m15
-        if df_for_analysis is None or len(df_for_analysis) < 50:
-            logger.warning(f"Insufficient market data for {symbol}")
-            return
-        # 2. Market Structure Analysis (uses all timeframes internally)
-        market_structure_signal = market_structure_strategy.analyze_pair(df_for_analysis, symbol)
+        # Try all timeframes for a valid signal
+        timeframes = [(df_m1, '1min'), (df_m3, '3min'), (df_m5, '5min'), (df_m15, '15min'), (df_h1, '60min')]
+        market_structure_signal = None
+        for df, tf_name in timeframes:
+            if df is not None and len(df) >= 50:
+                signal = market_structure_strategy.analyze_pair(df, symbol)
+                if signal:
+                    market_structure_signal = signal
+                    logger.info(f"Valid market structure signal found for {symbol} on {tf_name} timeframe.")
+                    break
         if not market_structure_signal:
-            logger.info(f"No Market Structure signal for {symbol}")
+            logger.info(f"No Market Structure signal for {symbol} on any timeframe.")
             return
         signal_type = market_structure_signal.get('signal')
         if not signal_type:
@@ -223,7 +227,7 @@ class AITradingService:
         position_size = max(position_size, self.config.MIN_POSITION_SIZE)
         # Final pre-trade checklist
         checklist = [
-            (7 <= now.hour < 19),  # Only allow trades between 7am and 7pm
+            (7 <= now.hour < 21),  # Only allow trades between 7am and 9pm
             self.risk_manager.can_trade_pair_today(symbol),
             market_structure_signal.get('trend') in ['bullish', 'bearish'],
             market_structure_signal.get('order_blocks_count', 0) > 0,
@@ -232,9 +236,10 @@ class AITradingService:
             market_structure_signal.get('take_profit') is not None,
             not self._is_major_news_event(symbol, now=now),
             self.risk_manager.get_drawdown() <= 0.05,
-            spread is None or spread <= 2.0
+            spread is None or spread <= 3.0
         ]
-        if not all(checklist):
+        # Allow trade if at least 5 out of 10 conditions are met
+        if sum(bool(x) for x in checklist) < 5:
             logger.info(f"Final checklist failed for {symbol}. Skipping trade.")
             return
         # 5. Execute Trade
@@ -242,6 +247,8 @@ class AITradingService:
             order_type = "buy" if signal_type == "BUY" else "sell"
             take_profit = market_structure_signal.get('take_profit')
             sl_pips = abs(entry_price - stop_loss) / 0.0001
+            # Reduce stop-loss distance by 15%
+            sl_pips = sl_pips * 0.85
             tp_pips = abs(entry_price - take_profit) / 0.0001 if take_profit else None
             result = await self.mt5.place_order(
                 symbol=symbol,
@@ -276,8 +283,8 @@ class AITradingService:
         New, less strict strategy: aggregate indicators with weights, use OR logic, dynamic lot sizing, session filter, cooldown, and logging.
         """
         now = datetime.datetime.now()
-        # Only trade during London/NY sessions (8:00-17:00 UTC, can be adjusted)
-        if not (8 <= now.hour < 17):
+        # Only trade during London/NY sessions (7:00-21:00 UTC, expanded)
+        if not (7 <= now.hour < 21):
             logger.info(f"[CONF] {symbol}: Outside London/NY session. Skipping.")
             return
         # Cooldown check
@@ -301,9 +308,9 @@ class AITradingService:
         last_macd = macd.iloc[-1]
         last_macd_signal = macd_signal.iloc[-1]
         # Indicator signals (OR logic)
-        rsi_signal = last_rsi < 30 or last_rsi > 70
+        rsi_signal = last_rsi < 20 or last_rsi > 80
         macd_signal_bool = (last_macd > last_macd_signal) or (last_macd < last_macd_signal)
-        session_signal = 8 <= now.hour < 17
+        session_signal = 7 <= now.hour < 21
         # Assign weights and calculate confidence
         weighted_sum = (
             self.confidence_weights['rsi'] * int(rsi_signal) +
@@ -334,7 +341,7 @@ class AITradingService:
                 symbol=symbol,
                 order_type=order_type,
                 lot=lot,
-                sl_pips=abs(price - stop_loss) / 0.0001,
+                sl_pips=abs(price - stop_loss) / 0.0001 * 0.85,
                 tp_pips=abs(price - take_profit) / 0.0001
             )
             if result.get('success'):
