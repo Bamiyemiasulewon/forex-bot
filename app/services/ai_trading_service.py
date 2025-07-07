@@ -238,8 +238,8 @@ class AITradingService:
             self.risk_manager.get_drawdown() <= 0.05,
             spread is None or spread <= 3.0
         ]
-        # Allow trade if at least 5 out of 10 conditions are met
-        if sum(bool(x) for x in checklist) < 5:
+        # Allow trade if at least 2 out of 10 conditions are met
+        if sum(bool(x) for x in checklist) < 2:
             logger.info(f"Final checklist failed for {symbol}. Skipping trade.")
             return
         # 5. Execute Trade
