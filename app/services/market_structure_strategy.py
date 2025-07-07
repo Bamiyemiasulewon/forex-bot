@@ -263,9 +263,15 @@ class MarketStructureStrategy:
             latest_block = max(order_blocks, key=lambda x: x['index'])
             block_time = df.index[latest_block['index']]
             now = df.index[-1]
-            if hasattr(block_time, 'to_pydatetime'):
+            # Ensure both are datetime objects
+            import datetime
+            if isinstance(block_time, (int, float)):
+                block_time = datetime.datetime.fromtimestamp(block_time)
+            elif hasattr(block_time, 'to_pydatetime'):
                 block_time = block_time.to_pydatetime()
-            if hasattr(now, 'to_pydatetime'):
+            if isinstance(now, (int, float)):
+                now = datetime.datetime.fromtimestamp(now)
+            elif hasattr(now, 'to_pydatetime'):
                 now = now.to_pydatetime()
             age_hours = (now - block_time).total_seconds() / 3600
             if age_hours > 12:

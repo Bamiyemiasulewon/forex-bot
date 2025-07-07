@@ -184,12 +184,9 @@ class AITradingService:
         df_h1 = await self.mt5.get_candles(symbol, "1h", 100)
         df_m5 = await self.mt5.get_candles(symbol, "5m", 100)
         df_m1 = await self.mt5.get_candles(symbol, "1m", 100)
-        try:
-            df_m3 = await self.mt5.get_candles(symbol, "3m", 100)
-        except Exception:
-            df_m3 = None
+        # Remove 3m timeframe (not supported by MT5)
         # Try all timeframes for a valid signal
-        timeframes = [(df_m1, '1min'), (df_m3, '3min'), (df_m5, '5min'), (df_m15, '15min'), (df_h1, '60min')]
+        timeframes = [(df_m1, '1min'), (df_m5, '5min'), (df_m15, '15min'), (df_h1, '60min')]
         market_structure_signal = None
         for df, tf_name in timeframes:
             if df is not None and len(df) >= 50:
@@ -206,8 +203,12 @@ class AITradingService:
             logger.warning(f"No valid signal type for {symbol}")
             return
         # 3. Risk Management Check
-        if not self.risk_manager.can_trade():
-            logger.warning(f"Risk management blocked trade for {symbol}")
+        # Replace can_trade() with explicit checks for daily trade count and loss limits
+        if self.risk_manager.daily_trade_count >= self.config.MAX_DAILY_TRADES:
+            logger.warning(f"Daily trade limit of {self.config.MAX_DAILY_TRADES} reached. No more trades today.")
+            return
+        if self.risk_manager.get_drawdown() > self.config.MAX_DAILY_DRAWDOWN:
+            logger.warning(f"Daily drawdown limit of {self.config.MAX_DAILY_DRAWDOWN*100:.2f}% reached. No more trades today.")
             return
         # 4. Position Size Calculation
         entry_price = market_structure_signal.get('entry_price')

@@ -259,7 +259,13 @@ class MT5Service:
             else:
                 return {"success": False, "error": "Invalid order type. Use 'buy' or 'sell'"}
             
-            # Prepare the order request
+            # --- Volume validation and rounding ---
+            min_vol = symbol_info.volume_min
+            step = symbol_info.volume_step
+            # Round lot to nearest allowed step and ensure >= min_vol
+            lot = max(min_vol, round(lot / step) * step)
+            
+            # --- Use supported filling mode ---
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -270,7 +276,7 @@ class MT5Service:
                 "magic": magic_number,
                 "comment": "AI Trade",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC
+                "type_filling": symbol_info.filling_mode  # Use supported filling mode
             }
             # Calculate stop loss and take profit prices only if provided
             sl_price = None

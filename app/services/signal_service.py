@@ -39,6 +39,7 @@ class SignalService:
         }
         tf = interval_map.get(interval.lower(), '15m')
         count = 1000 if outputsize == 'full' else 100
+        # Only fetch from MT5, never raise rate limit errors
         return await mt5_service.get_candles(pair, tf, count)
 
     async def generate_signals(self) -> List[Dict]:
