@@ -5,9 +5,8 @@ from app.services.market_service import market_service
 from app.services.market_structure_strategy import market_structure_strategy
 import asyncio
 import logging
-import httpx
-from app.utils.secrets import ALPHA_VANTAGE_API_KEY
 import time
+from app.services.mt5_service import mt5_service
 
 logger = logging.getLogger(__name__)
 
@@ -18,70 +17,60 @@ class SignalService:
             "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
             "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURCHF", "XAUUSD"
         ]
-        self.base_url = "https://www.alphavantage.co/query"
-        self._last_signals_cache = None
-        self._last_signals_time = 0
         self._lock = asyncio.Lock()  # For throttling and concurrency
         self._pair_signal_cache = {}  # {pair: (signal, timestamp)}
 
+    async def fetch_ohlcv(self, pair: str, interval: str = '15min', outputsize: str = 'compact'):
+        """
+        Fetch OHLCV (candlestick) data for a forex pair from the connected MT5 terminal.
+        Args:
+            pair: Symbol, e.g. 'EURUSD'
+            interval: Timeframe string, e.g. '15min', '1h', '1d'
+            outputsize: Only affects number of candles returned (for compatibility with old code)
+        Returns:
+            pd.DataFrame or None
+        """
+        # Map interval to MT5Service timeframe
+        interval_map = {
+            '1min': '1m', '5min': '5m', '15min': '15m', '30min': '30m',
+            '1h': '1h', '4h': '4h', '1d': '1d',
+            'M1': '1m', 'M5': '5m', 'M15': '15m', 'M30': '30m',
+            'H1': '1h', 'H4': '4h', 'D1': '1d',
+        }
+        tf = interval_map.get(interval.lower(), '15m')
+        count = 1000 if outputsize == 'full' else 100
+        return await mt5_service.get_candles(pair, tf, count)
+
     async def generate_signals(self) -> List[Dict]:
         """
-        Generates a list of real trading signals based on both RSI and Order Block + RSI + Fibonacci strategies.
-        Throttles requests to Alpha Vantage to 1 every 12 seconds (5 per minute).
-        Caches last successful signals as fallback if rate-limited.
+        Generates a list of real trading signals based on both RSI and Market Structure strategies.
+        Uses only MT5 data. No external API or rate limit logic.
         """
         async with self._lock:
-            now = time.time()
-            # If last signals were generated less than 12 seconds ago, return cached
-            if self._last_signals_cache and now - self._last_signals_time < 12:
-                logger.info("Returning cached signals due to throttling.")
-                return self._last_signals_cache
             signals = []
-            for i, pair in enumerate(self.pairs_to_scan):
+            for pair in self.pairs_to_scan:
                 try:
-                    # Throttle: 1 request every 12 seconds
-                    if i > 0:
-                        await asyncio.sleep(12)
                     signal = await self.analyze_pair_for_signal(pair)
                     if signal:
                         signals.append(signal)
-                except RuntimeError as e:
-                    if str(e) == "rate_limited":
-                        logger.warning("Alpha Vantage rate limit hit. Returning cached signals if available.")
-                        if self._last_signals_cache:
-                            # Return cached signals with a warning
-                            warning = {"warning": "⚠️ Data provider rate limit hit. Showing last available signals."}
-                            return [warning] + self._last_signals_cache
-                        else:
-                            # Return a user-friendly error message
-                            return [{"error": "⚠️ Signal generation is temporarily limited by our data provider. Please try again in a minute."}]
                 except Exception as e:
                     logger.error(f"Error generating signal for {pair}: {e}", exc_info=True)
-            if signals:
-                self._last_signals_cache = signals
-                self._last_signals_time = time.time()
             return signals
 
     async def analyze_pair_for_signal(self, pair: str) -> Optional[Dict]:
-        """Analyzes a single pair and returns a signal if conditions are met for Market Structure strategy."""
+        """Analyzes a single pair and returns a signal if conditions are met for Market Structure strategy. Uses only MT5 data."""
         try:
-            # Fetch historical data (e.g., 15-minute timeframe for market structure analysis)
-            df = await market_service.get_historical_data(pair, interval='15min', outputsize='compact')
+            df = await self.fetch_ohlcv(pair, interval='15min', outputsize='compact')
             if df is None or len(df) < 50:
                 logger.info(f"Not enough historical data for {pair}, skipping.")
                 return None
-            
-            # Get current price for signal details
             ticker = await market_service.get_market_data(pair)
             if not ticker or not ticker.get('price'):
                 logger.warning(f"Could not fetch ticker data for {pair}, skipping.")
                 return None
             current_price = ticker['price']
-            
-            # Use Market Structure strategy (new strategy)
             market_structure_signal = market_structure_strategy.analyze_pair(df, pair)
             if market_structure_signal:
-                # Add current price and pair info
                 market_structure_signal.update({
                     'pair': pair,
                     'current_price': current_price,
@@ -89,12 +78,6 @@ class SignalService:
                 })
                 logger.info(f"Market Structure signal generated for {pair}: {market_structure_signal['signal']}")
                 return market_structure_signal
-            
-            return None
-        except RuntimeError as e:
-            if str(e) == "rate_limited":
-                raise
-            logger.error(f"Could not generate signal for {pair}: {e}", exc_info=True)
             return None
         except Exception as e:
             logger.error(f"Could not generate signal for {pair}: {e}", exc_info=True)
@@ -150,10 +133,9 @@ class SignalService:
         }
 
     async def get_signal_for_pair(self, pair: str) -> Optional[Dict]:
-        """Get a signal for a specific pair, with rate limit fallback to cached signal."""
+        """Get a signal for a specific pair. Uses only MT5 data."""
         cache_duration = 60  # seconds
         now = time.time()
-        # Check per-pair cache first
         cached = self._pair_signal_cache.get(pair)
         if cached and now - cached[1] < cache_duration:
             return cached[0]
@@ -162,12 +144,6 @@ class SignalService:
             if signal:
                 self._pair_signal_cache[pair] = (signal, now)
                 return signal
-        except RuntimeError as e:
-            if str(e) == "rate_limited":
-                # Try to return cached signal for this pair
-                if cached and now - cached[1] < cache_duration:
-                    return {"warning": "\u26a0\ufe0f Data provider rate limit hit. Showing last available signal.", **cached[0]}
-                return {"error": "\u26a0\ufe0f Signal temporarily unavailable due to data provider rate limit. Please try again in a minute."}
         except Exception as e:
             logger.error(f"Error in get_signal_for_pair for {pair}: {e}", exc_info=True)
             return {"error": f"Error fetching signal for {pair}: {e}"}

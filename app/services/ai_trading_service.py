@@ -403,7 +403,7 @@ class AITradingService:
                     continue
 
                 # Fetch current market data
-                df = await self.signal_service.fetch_ohlcv(symbol, interval='15min', outputsize='compact')
+                df = await self.signal_service.fetch_ohlcv(symbol, interval='15min')
                 if df is None or len(df) < 50:
                     continue
 

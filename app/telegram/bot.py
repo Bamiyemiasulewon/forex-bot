@@ -539,7 +539,8 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pair == "XAUUSD":
         # Try to fetch real OHLCV data for XAUUSD
         from app.services.signal_service import signal_service
-        df = await signal_service.fetch_ohlcv(pair, interval='15min', outputsize='compact')
+        # Fetch OHLCV data for XAUUSD using MT5 only
+        df = await signal_service.fetch_ohlcv(pair, interval='15min')
         if df is not None and len(df) > 0:
             price = df['close'].iloc[-1]
             high = df['high'].max()
