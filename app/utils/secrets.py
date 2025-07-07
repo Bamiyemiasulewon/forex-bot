@@ -5,9 +5,6 @@ from dotenv import load_dotenv
 load_dotenv()
 FERNET_KEY = os.getenv("FERNET_KEY")
 
-# Alpha Vantage API key for forex data
-ALPHA_VANTAGE_API_KEY = "1TFGIZ3Y817GY9XX"
-
 # Telegram Forex Bot API token
 TELEGRAM_FOREX_BOT_TOKEN = "8071906329:AAH4BbllY9vwwcx0vukm6t6JPQdNWnnz-aY"
 

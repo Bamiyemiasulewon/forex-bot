@@ -179,13 +179,13 @@ class AITradingService:
         if daily_pair_loss < -max_daily_loss_per_pair:
             logger.warning(f"Daily loss limit reached for {symbol}. Skipping trade.")
             return
-        # 1. Fetch Market Data for all required timeframes
-        df_m15 = await self.signal_service.fetch_ohlcv(symbol, interval='15min', outputsize='compact')
-        df_h1 = await self.signal_service.fetch_ohlcv(symbol, interval='60min', outputsize='compact')
-        df_m5 = await self.signal_service.fetch_ohlcv(symbol, interval='5min', outputsize='compact')
-        df_m1 = await self.signal_service.fetch_ohlcv(symbol, interval='1min', outputsize='compact')
+        # 1. Fetch Market Data for all required timeframes (from MT5 only)
+        df_m15 = await self.mt5.get_candles(symbol, "15m", 100)
+        df_h1 = await self.mt5.get_candles(symbol, "1h", 100)
+        df_m5 = await self.mt5.get_candles(symbol, "5m", 100)
+        df_m1 = await self.mt5.get_candles(symbol, "1m", 100)
         try:
-            df_m3 = await self.signal_service.fetch_ohlcv(symbol, interval='3min', outputsize='compact')
+            df_m3 = await self.mt5.get_candles(symbol, "3m", 100)
         except Exception:
             df_m3 = None
         # Try all timeframes for a valid signal
@@ -295,8 +295,8 @@ class AITradingService:
         if symbol in self.confidence_traded_pairs_today:
             logger.info(f"[CONF] {symbol}: Already traded today. Skipping.")
             return
-        # Fetch data
-        df = await self.signal_service.fetch_ohlcv(symbol, interval='15min', outputsize='compact')
+        # In confidence strategy, fetch data from MT5 only
+        df = await self.mt5.get_candles(symbol, "15m", 100)
         if df is None or len(df) < 50:
             logger.info(f"[CONF] {symbol}: Not enough data.")
             return

@@ -18,87 +18,11 @@ class SignalService:
             "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
             "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURCHF", "XAUUSD"
         ]
-        self.alpha_vantage_api_key = ALPHA_VANTAGE_API_KEY
         self.base_url = "https://www.alphavantage.co/query"
         self._last_signals_cache = None
         self._last_signals_time = 0
         self._lock = asyncio.Lock()  # For throttling and concurrency
         self._pair_signal_cache = {}  # {pair: (signal, timestamp)}
-
-    async def fetch_ohlcv(self, pair: str, interval: str = '60min', outputsize: str = 'compact') -> Optional[pd.DataFrame]:
-        """Fetch historical OHLCV data for a forex pair from Alpha Vantage."""
-        if pair == 'XAUUSD':
-            # Use TIME_SERIES_DAILY for gold (XAUUSD)
-            params = {
-                "function": "TIME_SERIES_DAILY",
-                "symbol": "XAUUSD",
-                "outputsize": outputsize,
-                "apikey": self.alpha_vantage_api_key
-            }
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(self.base_url, params=params, timeout=10)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    time_series = data.get("Time Series (Daily)", {})
-                    if not time_series:
-                        logger.warning(f"No OHLCV data for {pair}")
-                        return None
-                    df = pd.DataFrame.from_dict(time_series, orient='index')
-                    df = df.rename(columns={
-                        '1. open': 'open',
-                        '2. high': 'high',
-                        '3. low': 'low',
-                        '4. close': 'close',
-                        '5. volume': 'volume'
-                    })
-                    df = df.astype(float)
-                    df = df.sort_index()  # Oldest first
-                    return df
-            except Exception as e:
-                logger.error(f"Error fetching OHLCV for {pair} from Alpha Vantage: {e}", exc_info=True)
-                return None
-        # Default FX logic
-        from_symbol, to_symbol = pair[:3], pair[3:]
-        params = {
-            "function": "FX_INTRADAY",
-            "from_symbol": from_symbol,
-            "to_symbol": to_symbol,
-            "interval": interval,
-            "outputsize": outputsize,
-            "apikey": self.alpha_vantage_api_key
-        }
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(self.base_url, params=params, timeout=10)
-                resp.raise_for_status()
-                data = resp.json()
-                # Alpha Vantage rate limit error detection
-                if any("Thank you for using Alpha Vantage" in str(v) for v in data.values()):
-                    logger.warning(f"Alpha Vantage rate limit hit for {pair}")
-                    raise RuntimeError("rate_limited")
-                time_series = data.get(f"Time Series FX ({interval})", {})
-                if not time_series:
-                    logger.warning(f"No OHLCV data for {pair}")
-                    return None
-                df = pd.DataFrame.from_dict(time_series, orient='index')
-                df = df.rename(columns={
-                    '1. open': 'open',
-                    '2. high': 'high',
-                    '3. low': 'low',
-                    '4. close': 'close'
-                })
-                df = df.astype(float)
-                df = df.sort_index()  # Oldest first
-                return df
-        except RuntimeError as e:
-            if str(e) == "rate_limited":
-                raise
-            logger.error(f"Error fetching OHLCV for {pair} from Alpha Vantage: {e}", exc_info=True)
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching OHLCV for {pair} from Alpha Vantage: {e}", exc_info=True)
-            return None
 
     async def generate_signals(self) -> List[Dict]:
         """
@@ -142,7 +66,7 @@ class SignalService:
         """Analyzes a single pair and returns a signal if conditions are met for Market Structure strategy."""
         try:
             # Fetch historical data (e.g., 15-minute timeframe for market structure analysis)
-            df = await self.fetch_ohlcv(pair, interval='15min', outputsize='compact')
+            df = await market_service.get_historical_data(pair, interval='15min', outputsize='compact')
             if df is None or len(df) < 50:
                 logger.info(f"Not enough historical data for {pair}, skipping.")
                 return None
