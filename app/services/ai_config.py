@@ -20,13 +20,16 @@ class AIConfig:
 
     # --- Risk Management ---
     RISK_PER_TRADE_PERCENT: float = 5.0
+    RISK_PER_TRADE: float = 0.05  # 5% risk per trade (as decimal)
     RISK_REWARD_RATIO: float = 3.0
     MAX_DAILY_TRADES: int = 10
     MAX_DAILY_RISK_PERCENT: float = 10.0
     MINIMUM_ACCOUNT_BALANCE: float = 20.0
     MAX_ACCOUNT_DRAWDOWN_PERCENT: float = 20.0
     EMERGENCY_STOP_DAILY_DRAWDOWN_PERCENT: float = 15.0
+    MAX_DAILY_DRAWDOWN: float = 0.15  # 15% daily drawdown limit (as decimal)
     MIN_POSITION_SIZE: float = 0.01
+    MAX_POSITION_SIZE: float = 1.0  # Maximum position size in lots
 
     # --- Indicator Settings ---
     RSI_PERIOD: int = 14
