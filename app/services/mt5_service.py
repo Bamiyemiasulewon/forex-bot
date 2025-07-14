@@ -264,7 +264,20 @@ class MT5Service:
             step = symbol_info.volume_step
             # Round lot to nearest allowed step and ensure >= min_vol
             lot = max(min_vol, round(lot / step) * step)
-            
+
+            # --- Dynamically select supported filling mode ---
+            # Default to FOK, fallback to RETURN, then IOC
+            filling_mode = None
+            if hasattr(mt5, 'ORDER_FILLING_FOK') and (symbol_info.filling_mode & mt5.ORDER_FILLING_FOK):
+                filling_mode = mt5.ORDER_FILLING_FOK
+            elif hasattr(mt5, 'ORDER_FILLING_RETURN') and (symbol_info.filling_mode & mt5.ORDER_FILLING_RETURN):
+                filling_mode = mt5.ORDER_FILLING_RETURN
+            elif hasattr(mt5, 'ORDER_FILLING_IOC') and (symbol_info.filling_mode & mt5.ORDER_FILLING_IOC):
+                filling_mode = mt5.ORDER_FILLING_IOC
+            else:
+                # fallback to FOK if nothing else
+                filling_mode = mt5.ORDER_FILLING_FOK if hasattr(mt5, 'ORDER_FILLING_FOK') else 0
+
             # --- Use supported filling mode ---
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -276,7 +289,7 @@ class MT5Service:
                 "magic": magic_number,
                 "comment": "AI Trade",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": symbol_info.filling_mode  # Use supported filling mode
+                "type_filling": filling_mode
             }
             # Calculate stop loss and take profit prices only if provided
             sl_price = None
