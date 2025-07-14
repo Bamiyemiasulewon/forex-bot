@@ -239,50 +239,34 @@ class MT5Service:
             if symbol_info is None:
                 return {"success": False, "error": f"Symbol {symbol} not found"}
             
+            # --- Helper: Get supported filling modes for the symbol ---
+            def get_supported_filling_modes(symbol_info):
+                valid_modes = [getattr(mt5, 'ORDER_FILLING_FOK', 0), getattr(mt5, 'ORDER_FILLING_IOC', 1), getattr(mt5, 'ORDER_FILLING_RETURN', 2)]
+                modes = []
+                # Use filling_modes bitmask if available (newer MT5)
+                if hasattr(symbol_info, 'filling_modes') and symbol_info.filling_modes:
+                    for mode in valid_modes:
+                        if symbol_info.filling_modes & mode:
+                            modes.append(mode)
+                # If only filling_mode is available, use it if it's valid
+                elif hasattr(symbol_info, 'filling_mode') and symbol_info.filling_mode in valid_modes:
+                    modes.append(symbol_info.filling_mode)
+                # Fallback: default to FOK (0)
+                if not modes:
+                    modes = [getattr(mt5, 'ORDER_FILLING_FOK', 0)]
+                logger.info(f"Supported filling modes for {symbol_info.name}: {modes}")
+                return modes
+
+            # --- Symbol validation ---
             if not symbol_info.visible:
                 if not mt5.symbol_select(symbol, True):
-                    return {"success": False, "error": f"Failed to select symbol {symbol}"}
-            
-            # Get current tick
-            tick = mt5.symbol_info_tick(symbol)
-            if tick is None:
-                return {"success": False, "error": f"Failed to get tick for {symbol}"}
-            
-            # Determine order type and price
-            order_type_lower = order_type.lower()
-            if order_type_lower == "buy":
-                order_type_mt5 = mt5.ORDER_TYPE_BUY
-                market_price = tick.ask
-            elif order_type_lower == "sell":
-                order_type_mt5 = mt5.ORDER_TYPE_SELL
-                market_price = tick.bid
-            else:
-                return {"success": False, "error": "Invalid order type. Use 'buy' or 'sell'"}
-            
-            # --- Volume validation and rounding ---
-            min_vol = symbol_info.volume_min
-            step = symbol_info.volume_step
-            # Round lot to nearest allowed step and ensure >= min_vol
-            lot = max(min_vol, round(lot / step) * step)
+                    logger.error(f"Symbol {symbol} is not visible and could not be selected.")
+                    return {"success": False, "error": f"Symbol {symbol} is not visible and could not be selected."}
 
-            # --- Prepare supported filling modes ---
-            supported_modes = []
-            # Use filling_modes bitmask if available (newer MT5), else fallback to filling_mode
-            if hasattr(symbol_info, 'filling_modes') and symbol_info.filling_modes:
-                if hasattr(mt5, 'ORDER_FILLING_FOK') and (symbol_info.filling_modes & mt5.ORDER_FILLING_FOK):
-                    supported_modes.append(mt5.ORDER_FILLING_FOK)
-                if hasattr(mt5, 'ORDER_FILLING_RETURN') and (symbol_info.filling_modes & mt5.ORDER_FILLING_RETURN):
-                    supported_modes.append(mt5.ORDER_FILLING_RETURN)
-                if hasattr(mt5, 'ORDER_FILLING_IOC') and (symbol_info.filling_modes & mt5.ORDER_FILLING_IOC):
-                    supported_modes.append(mt5.ORDER_FILLING_IOC)
-            elif hasattr(symbol_info, 'filling_mode'):
-                supported_modes.append(symbol_info.filling_mode)
-            else:
-                # Fallback: try FOK and RETURN
-                if hasattr(mt5, 'ORDER_FILLING_FOK'):
-                    supported_modes.append(mt5.ORDER_FILLING_FOK)
-                if hasattr(mt5, 'ORDER_FILLING_RETURN'):
-                    supported_modes.append(mt5.ORDER_FILLING_RETURN)
+            supported_modes = get_supported_filling_modes(symbol_info)
+            if not supported_modes:
+                logger.error(f"No supported filling modes found for {symbol}.")
+                return {"success": False, "error": "No supported filling modes for this symbol."}
 
             last_error = None
             for filling_mode in supported_modes:
@@ -336,6 +320,16 @@ class MT5Service:
                     logger.warning(f"TP too close for {symbol}: {tp_price} (min stop: {min_stop})")
                     return {"success": False, "error": f"Take profit too close to price (min: {min_stop})"}
 
+                # --- Extreme SL/TP value check ---
+                # For XAUUSD/metals, use 10000 points; for others, 1000 pips
+                max_sl_tp_distance = 10000 * symbol_info.point if symbol.upper().startswith('XAU') else 1000 * symbol_info.point
+                if sl_price is not None and abs(market_price - sl_price) > max_sl_tp_distance:
+                    logger.warning(f"SL too far for {symbol}: {sl_price} (max allowed: {max_sl_tp_distance})")
+                    return {"success": False, "error": f"Stop loss too far from price (max: {max_sl_tp_distance})"}
+                if tp_price is not None and abs(market_price - tp_price) > max_sl_tp_distance:
+                    logger.warning(f"TP too far for {symbol}: {tp_price} (max allowed: {max_sl_tp_distance})")
+                    return {"success": False, "error": f"Take profit too far from price (max: {max_sl_tp_distance})"}
+
                 logger.info(f"MT5 order request: {request}")
                 # Send order
                 result = mt5.order_send(request)
@@ -371,7 +365,7 @@ class MT5Service:
                         "sl": sl_pips,
                         "tp": tp_pips
                     }
-                elif result.comment and "Unsupported filling mode" in result.comment:
+                elif result.retcode == 10030 or (result.comment and "Unsupported filling mode" in result.comment):
                     last_error = result.comment
                     logger.warning(f"Filling mode {filling_mode} not supported for {symbol}, trying next mode...")
                     continue
@@ -777,7 +771,7 @@ class MT5Service:
             df['time'] = pd.to_datetime(df['time'], unit='s')
             return df
         except Exception as e:
-            logger.error(f"Error fetching candles for {symbol}: {e}", exc_info=True)
+            logger.error(f"Could not fetch candles for {symbol}: {e}")
             return None
 
     async def get_server_time(self) -> datetime:
