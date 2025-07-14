@@ -399,7 +399,8 @@ class AITradingService:
                 return
 
             for position in positions:
-                symbol = position.get('symbol')
+                # Support both dict and object (TradePosition)
+                symbol = position.get('symbol') if isinstance(position, dict) else getattr(position, 'symbol', None)
                 if not symbol:
                     continue
 
@@ -414,7 +415,7 @@ class AITradingService:
                     continue
 
                 current_signal_type = current_signal.get('signal')
-                position_type = position.get('type', '').lower()
+                position_type = position.get('type', '').lower() if isinstance(position, dict) else getattr(position, 'type', '').lower()
 
                 # Check if we should close the position based on signal reversal
                 should_close = False
@@ -434,7 +435,7 @@ class AITradingService:
                     close_reason = "Market structure shows ranging conditions"
 
                 if should_close:
-                    ticket = position.get('ticket')
+                    ticket = position.get('ticket') if isinstance(position, dict) else getattr(position, 'ticket', None)
                     if ticket:
                         close_result = await self.mt5.close_position(ticket)
                         if close_result.get('success'):

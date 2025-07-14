@@ -313,6 +313,15 @@ class MT5Service:
                 if tp_price is not None:
                     request["tp"] = tp_price
 
+                # --- Minimum stop level check ---
+                min_stop = symbol_info.stops_level * symbol_info.point
+                if sl_price is not None and abs(market_price - sl_price) < min_stop:
+                    logger.warning(f"SL too close for {symbol}: {sl_price} (min stop: {min_stop})")
+                    return {"success": False, "error": f"Stop loss too close to price (min: {min_stop})"}
+                if tp_price is not None and abs(market_price - tp_price) < min_stop:
+                    logger.warning(f"TP too close for {symbol}: {tp_price} (min stop: {min_stop})")
+                    return {"success": False, "error": f"Take profit too close to price (min: {min_stop})"}
+
                 logger.info(f"MT5 order request: {request}")
                 # Send order
                 result = mt5.order_send(request)
