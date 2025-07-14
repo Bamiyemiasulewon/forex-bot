@@ -265,88 +265,98 @@ class MT5Service:
             # Round lot to nearest allowed step and ensure >= min_vol
             lot = max(min_vol, round(lot / step) * step)
 
-            # --- Dynamically select supported filling mode ---
-            # Default to FOK, fallback to RETURN, then IOC
-            filling_mode = None
-            if hasattr(mt5, 'ORDER_FILLING_FOK') and (symbol_info.filling_mode & mt5.ORDER_FILLING_FOK):
-                filling_mode = mt5.ORDER_FILLING_FOK
-            elif hasattr(mt5, 'ORDER_FILLING_RETURN') and (symbol_info.filling_mode & mt5.ORDER_FILLING_RETURN):
-                filling_mode = mt5.ORDER_FILLING_RETURN
-            elif hasattr(mt5, 'ORDER_FILLING_IOC') and (symbol_info.filling_mode & mt5.ORDER_FILLING_IOC):
-                filling_mode = mt5.ORDER_FILLING_IOC
-            else:
-                # fallback to FOK if nothing else
-                filling_mode = mt5.ORDER_FILLING_FOK if hasattr(mt5, 'ORDER_FILLING_FOK') else 0
+            # --- Prepare filling modes to try ---
+            tried_modes = set()
+            filling_modes_to_try = [symbol_info.filling_mode]
+            # Add common modes if not already in list
+            if hasattr(mt5, 'ORDER_FILLING_FOK') and mt5.ORDER_FILLING_FOK not in filling_modes_to_try:
+                filling_modes_to_try.append(mt5.ORDER_FILLING_FOK)
+            if hasattr(mt5, 'ORDER_FILLING_RETURN') and mt5.ORDER_FILLING_RETURN not in filling_modes_to_try:
+                filling_modes_to_try.append(mt5.ORDER_FILLING_RETURN)
+            if hasattr(mt5, 'ORDER_FILLING_IOC') and mt5.ORDER_FILLING_IOC not in filling_modes_to_try:
+                filling_modes_to_try.append(mt5.ORDER_FILLING_IOC)
 
-            # --- Use supported filling mode ---
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": lot,
-                "type": order_type_mt5,
-                "price": market_price,
-                "deviation": 10,
-                "magic": magic_number,
-                "comment": "AI Trade",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": filling_mode
-            }
-            # Calculate stop loss and take profit prices only if provided
-            sl_price = None
-            tp_price = None
-            if sl_pips is not None and sl_pips != 0:
-                if order_type_lower == "buy":
-                    sl_price = market_price - abs(sl_pips) * symbol_info.point
-                else:
-                    sl_price = market_price + abs(sl_pips) * symbol_info.point
-            if tp_pips is not None and tp_pips != 0:
-                if order_type_lower == "buy":
-                    tp_price = market_price + abs(tp_pips) * symbol_info.point
-                else:
-                    tp_price = market_price - abs(tp_pips) * symbol_info.point
-            # Always set SL/TP if provided (AI trades must have them)
-            if sl_price is not None:
-                request["sl"] = sl_price
-            if tp_price is not None:
-                request["tp"] = tp_price
+            last_error = None
+            for filling_mode in filling_modes_to_try:
+                if filling_mode in tried_modes:
+                    continue
+                tried_modes.add(filling_mode)
+                # Build request
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": lot,
+                    "type": order_type_mt5,
+                    "price": market_price,
+                    "deviation": 10,
+                    "magic": magic_number,
+                    "comment": "AI Trade",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling_mode
+                }
+                # Calculate stop loss and take profit prices only if provided
+                sl_price = None
+                tp_price = None
+                if sl_pips is not None and sl_pips != 0:
+                    if order_type_lower == "buy":
+                        sl_price = market_price - abs(sl_pips) * symbol_info.point
+                    else:
+                        sl_price = market_price + abs(sl_pips) * symbol_info.point
+                if tp_pips is not None and tp_pips != 0:
+                    if order_type_lower == "buy":
+                        tp_price = market_price + abs(tp_pips) * symbol_info.point
+                    else:
+                        tp_price = market_price - abs(tp_pips) * symbol_info.point
+                # Always set SL/TP if provided (AI trades must have them)
+                if sl_price is not None:
+                    request["sl"] = sl_price
+                if tp_price is not None:
+                    request["tp"] = tp_price
 
-            logger.info(f"MT5 order request: {request}")
-            # Send order
-            result = mt5.order_send(request)
-            logger.info(f"MT5 order result: {result}")
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                return {"success": False, "error": f"Order failed: {result.comment}"}
-            
-            logger.info(f"Order placed successfully: {result.order}")
-            # Record trade in DB
-            if user_id is not None:
-                db = SessionLocal()
-                try:
-                    trade = Trade(
-                        user_id=user_id,
-                        symbol=symbol,
-                        order_type=order_type,
-                        entry_price=result.price,
-                        stop_loss=sl_pips,
-                        take_profit=tp_pips,
-                        status='open',
-                    )
-                    db.add(trade)
-                    db.commit()
-                except Exception as e:
-                    logger.error(f"Failed to record trade in DB: {e}")
-                finally:
-                    db.close()
-            return {
-                "success": True,
-                "ticket": result.order,
-                "symbol": symbol,
-                "lot": lot,
-                "type": order_type,
-                "price": result.price,
-                "sl": sl_pips,
-                "tp": tp_pips
-            }
+                logger.info(f"MT5 order request: {request}")
+                # Send order
+                result = mt5.order_send(request)
+                logger.info(f"MT5 order result: {result}")
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"Order placed successfully: {result.order}")
+                    # Record trade in DB
+                    if user_id is not None:
+                        db = SessionLocal()
+                        try:
+                            trade = Trade(
+                                user_id=user_id,
+                                symbol=symbol,
+                                order_type=order_type,
+                                entry_price=result.price,
+                                stop_loss=sl_pips,
+                                take_profit=tp_pips,
+                                status='open',
+                            )
+                            db.add(trade)
+                            db.commit()
+                        except Exception as e:
+                            logger.error(f"Failed to record trade in DB: {e}")
+                        finally:
+                            db.close()
+                    return {
+                        "success": True,
+                        "ticket": result.order,
+                        "symbol": symbol,
+                        "lot": lot,
+                        "type": order_type,
+                        "price": result.price,
+                        "sl": sl_pips,
+                        "tp": tp_pips
+                    }
+                elif result.comment and "Unsupported filling mode" in result.comment:
+                    last_error = result.comment
+                    logger.warning(f"Filling mode {filling_mode} not supported for {symbol}, trying next mode...")
+                    continue
+                else:
+                    last_error = result.comment
+                    break
+            # If we get here, all modes failed
+            return {"success": False, "error": f"Order failed: {last_error or 'Unknown error'}"}
             
         except Exception as e:
             logger.error(f"Error placing order for {symbol}: {e}", exc_info=True)
