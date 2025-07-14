@@ -265,22 +265,27 @@ class MT5Service:
             # Round lot to nearest allowed step and ensure >= min_vol
             lot = max(min_vol, round(lot / step) * step)
 
-            # --- Prepare filling modes to try ---
-            tried_modes = set()
-            filling_modes_to_try = [symbol_info.filling_mode]
-            # Add common modes if not already in list
-            if hasattr(mt5, 'ORDER_FILLING_FOK') and mt5.ORDER_FILLING_FOK not in filling_modes_to_try:
-                filling_modes_to_try.append(mt5.ORDER_FILLING_FOK)
-            if hasattr(mt5, 'ORDER_FILLING_RETURN') and mt5.ORDER_FILLING_RETURN not in filling_modes_to_try:
-                filling_modes_to_try.append(mt5.ORDER_FILLING_RETURN)
-            if hasattr(mt5, 'ORDER_FILLING_IOC') and mt5.ORDER_FILLING_IOC not in filling_modes_to_try:
-                filling_modes_to_try.append(mt5.ORDER_FILLING_IOC)
+            # --- Prepare supported filling modes ---
+            supported_modes = []
+            # Use filling_modes bitmask if available (newer MT5), else fallback to filling_mode
+            if hasattr(symbol_info, 'filling_modes') and symbol_info.filling_modes:
+                if hasattr(mt5, 'ORDER_FILLING_FOK') and (symbol_info.filling_modes & mt5.ORDER_FILLING_FOK):
+                    supported_modes.append(mt5.ORDER_FILLING_FOK)
+                if hasattr(mt5, 'ORDER_FILLING_RETURN') and (symbol_info.filling_modes & mt5.ORDER_FILLING_RETURN):
+                    supported_modes.append(mt5.ORDER_FILLING_RETURN)
+                if hasattr(mt5, 'ORDER_FILLING_IOC') and (symbol_info.filling_modes & mt5.ORDER_FILLING_IOC):
+                    supported_modes.append(mt5.ORDER_FILLING_IOC)
+            elif hasattr(symbol_info, 'filling_mode'):
+                supported_modes.append(symbol_info.filling_mode)
+            else:
+                # Fallback: try FOK and RETURN
+                if hasattr(mt5, 'ORDER_FILLING_FOK'):
+                    supported_modes.append(mt5.ORDER_FILLING_FOK)
+                if hasattr(mt5, 'ORDER_FILLING_RETURN'):
+                    supported_modes.append(mt5.ORDER_FILLING_RETURN)
 
             last_error = None
-            for filling_mode in filling_modes_to_try:
-                if filling_mode in tried_modes:
-                    continue
-                tried_modes.add(filling_mode)
+            for filling_mode in supported_modes:
                 # Build request
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
