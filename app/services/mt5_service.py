@@ -318,8 +318,17 @@ class MT5Service:
                 if tp_price is not None:
                     request["tp"] = tp_price
 
-                # --- Minimum stop level check ---
-                min_stop = symbol_info.stops_level * symbol_info.point
+                # --- Minimum stop level check (robust for all brokers/servers) ---
+                min_stop_raw = None
+                if hasattr(symbol_info, 'stops_level') and symbol_info.stops_level is not None:
+                    min_stop_raw = symbol_info.stops_level
+                elif hasattr(symbol_info, 'trade_stops_level') and symbol_info.trade_stops_level is not None:
+                    min_stop_raw = symbol_info.trade_stops_level
+                if min_stop_raw is None:
+                    min_stop_raw = 0
+                    logger.warning(f"Symbol {symbol} has no stops_level or trade_stops_level attribute; using default 0.")
+                min_stop = min_stop_raw * symbol_info.point
+
                 if sl_price is not None and abs(market_price - sl_price) < min_stop:
                     logger.warning(f"SL too close for {symbol}: {sl_price} (min stop: {min_stop})")
                     return {"success": False, "error": f"Stop loss too close to price (min: {min_stop})"}
