@@ -226,6 +226,16 @@ class AITradingService:
         position_size = risk_amount / (pip_value * stop_loss_pips)
         position_size = min(position_size, self.config.MAX_POSITION_SIZE)
         position_size = max(position_size, self.config.MIN_POSITION_SIZE)
+        # --- Volume rounding and validation ---
+        symbol_info = None
+        if hasattr(self.mt5, 'filling_handler') and hasattr(self.mt5.filling_handler, 'mt5'):
+            symbol_info = self.mt5.filling_handler.mt5.symbol_info(symbol)
+        if symbol_info:
+            min_vol = getattr(symbol_info, 'volume_min', 0.01)
+            max_vol = getattr(symbol_info, 'volume_max', 100.0)
+            step_vol = getattr(symbol_info, 'volume_step', 0.01)
+            # Round to nearest step
+            position_size = max(min_vol, min(max_vol, round(position_size / step_vol) * step_vol))
         # Final pre-trade checklist
         checklist = [
             (7 <= now.hour < 21),  # Only allow trades between 7am and 9pm
@@ -251,12 +261,14 @@ class AITradingService:
             # Reduce stop-loss distance by 15%
             sl_pips = sl_pips * 0.85
             tp_pips = abs(entry_price - take_profit) / 0.0001 if take_profit else None
-            result = await self.mt5.place_order(
+            # Use the new filling handler for robust order placement
+            result = self.mt5.filling_handler.place_order_with_fallback(
                 symbol=symbol,
+                volume=position_size,
                 order_type=order_type,
-                lot=position_size,
-                sl_pips=sl_pips,
-                tp_pips=tp_pips
+                price=entry_price,
+                sl=stop_loss,
+                tp=take_profit
             )
             if result.get('success'):
                 logger.info(f"Trade placed for {symbol}: {order_type} {position_size} lots at {entry_price}")
@@ -326,6 +338,15 @@ class AITradingService:
             base_lot = 0.01
             lot = base_lot + (weighted_sum - self.confidence_threshold) * 0.05  # More confidence, bigger lot
             lot = min(max(lot, 0.01), 1.0)
+            # --- Volume rounding and validation ---
+            symbol_info = None
+            if hasattr(self.mt5, 'filling_handler') and hasattr(self.mt5.filling_handler, 'mt5'):
+                symbol_info = self.mt5.filling_handler.mt5.symbol_info(symbol)
+            if symbol_info:
+                min_vol = getattr(symbol_info, 'volume_min', 0.01)
+                max_vol = getattr(symbol_info, 'volume_max', 100.0)
+                step_vol = getattr(symbol_info, 'volume_step', 0.01)
+                lot = max(min_vol, min(max_vol, round(lot / step_vol) * step_vol))
             # Direction
             if last_rsi < 30 or (last_macd > last_macd_signal):
                 order_type = 'buy'
@@ -338,12 +359,13 @@ class AITradingService:
             price = close.iloc[-1]
             stop_loss = price * (0.995 if order_type == 'buy' else 1.005)
             take_profit = price * (1.01 if order_type == 'buy' else 0.99)
-            result = await self.mt5.place_order(
+            result = self.mt5.filling_handler.place_order_with_fallback(
                 symbol=symbol,
+                volume=lot,
                 order_type=order_type,
-                lot=lot,
-                sl_pips=abs(price - stop_loss) / 0.0001 * 0.85,
-                tp_pips=abs(price - take_profit) / 0.0001
+                price=price,
+                sl=stop_loss,
+                tp=take_profit
             )
             if result.get('success'):
                 self.last_confidence_trade_time = time.time()

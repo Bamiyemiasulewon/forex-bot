@@ -19,12 +19,137 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+class MT5FillingModeHandler:
+    def __init__(self, mt5_module, logger, session_local, trade_model):
+        self.mt5 = mt5_module
+        self.logger = logger
+        self.SessionLocal = session_local
+        self.Trade = trade_model
+
+    def get_supported_filling_modes(self, symbol_info):
+        valid_modes = [getattr(self.mt5, 'ORDER_FILLING_FOK', 0), getattr(self.mt5, 'ORDER_FILLING_IOC', 1), getattr(self.mt5, 'ORDER_FILLING_RETURN', 2)]
+        modes = []
+        if hasattr(symbol_info, 'filling_modes') and symbol_info.filling_modes:
+            for mode in valid_modes:
+                if symbol_info.filling_modes & mode:
+                    modes.append(mode)
+        elif hasattr(symbol_info, 'filling_mode') and symbol_info.filling_mode in valid_modes:
+            modes.append(symbol_info.filling_mode)
+        if not modes:
+            modes = valid_modes.copy()
+        return modes
+
+    def place_order_with_fallback(self, symbol, volume, order_type, price, sl=None, tp=None, magic_number=0, user_id=None):
+        mt5 = self.mt5
+        logger = self.logger
+        SessionLocal = self.SessionLocal
+        Trade = self.Trade
+
+        order_type_lower = order_type.lower()
+        if order_type_lower == "buy":
+            order_type_mt5 = mt5.ORDER_TYPE_BUY
+        elif order_type_lower == "sell":
+            order_type_mt5 = mt5.ORDER_TYPE_SELL
+        elif order_type_lower == "buylimit":
+            order_type_mt5 = mt5.ORDER_TYPE_BUY_LIMIT
+        elif order_type_lower == "selllimit":
+            order_type_mt5 = mt5.ORDER_TYPE_SELL_LIMIT
+        elif order_type_lower == "buystop":
+            order_type_mt5 = mt5.ORDER_TYPE_BUY_STOP
+        elif order_type_lower == "sellstop":
+            order_type_mt5 = mt5.ORDER_TYPE_SELL_STOP
+        else:
+            return {"success": False, "error": f"Unknown order type: {order_type}"}
+
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            return {"success": False, "error": f"Symbol {symbol} not found"}
+        if not symbol_info.visible:
+            if not mt5.symbol_select(symbol, True):
+                return {"success": False, "error": f"Symbol {symbol} is not visible and could not be selected."}
+
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return {"success": False, "error": f"Failed to get tick for {symbol}"}
+        if order_type_lower in ["buy", "buylimit", "buystop"]:
+            market_price = tick.ask
+        else:
+            market_price = tick.bid
+        if price is not None:
+            market_price = price
+
+        supported_modes = self.get_supported_filling_modes(symbol_info)
+        all_modes = supported_modes + [m for m in [getattr(mt5, 'ORDER_FILLING_FOK', 0), getattr(mt5, 'ORDER_FILLING_IOC', 1), getattr(mt5, 'ORDER_FILLING_RETURN', 2)] if m not in supported_modes]
+        logger.info(f"Order will try filling modes in order: {all_modes}")
+
+        last_error = None
+        for filling_mode in all_modes:
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": volume,
+                "type": order_type_mt5,
+                "price": market_price,
+                "deviation": 10,
+                "magic": magic_number,
+                "comment": "AI Trade",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode
+            }
+            if sl is not None:
+                request["sl"] = sl
+            if tp is not None:
+                request["tp"] = tp
+            logger.info(f"MT5 order request (filling_mode={filling_mode}): {request}")
+            result = mt5.order_send(request)
+            logger.info(f"MT5 order result (filling_mode={filling_mode}): {result}")
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Order placed successfully: {result.order}")
+                if user_id is not None:
+                    db = SessionLocal()
+                    try:
+                        trade = Trade(
+                            user_id=user_id,
+                            symbol=symbol,
+                            order_type=order_type,
+                            entry_price=result.price,
+                            stop_loss=sl,
+                            take_profit=tp,
+                            status='open',
+                        )
+                        db.add(trade)
+                        db.commit()
+                    except Exception as e:
+                        logger.error(f"Failed to record trade in DB: {e}")
+                    finally:
+                        db.close()
+                return {
+                    "success": True,
+                    "ticket": result.order,
+                    "symbol": symbol,
+                    "lot": volume,
+                    "type": order_type,
+                    "price": result.price,
+                    "sl": sl,
+                    "tp": tp
+                }
+            elif result.retcode == 10030 or (result.comment and "Unsupported filling mode" in result.comment):
+                last_error = result.comment
+                logger.warning(f"Filling mode {filling_mode} not supported for {symbol}, trying next mode...")
+                continue
+            else:
+                last_error = result.comment
+                break
+        return {"success": False, "error": f"Order failed: {last_error or 'Unknown error'}"}
+
 class MT5Service:
     """Service for MT5 trading operations."""
     
     def __init__(self):
         self.connected = False
         self.account_info = {}
+        # Add the filling mode handler
+        self.filling_handler = MT5FillingModeHandler(mt5, logger, SessionLocal, Trade)
         
     async def connect(self, login: str, password: str, server: str) -> Dict[str, Any]:
         """Connect to MT5 terminal."""
@@ -234,11 +359,37 @@ class MT5Service:
             return {"success": False, "error": "Not connected to MT5"}
         
         try:
+            # Map string order_type to MT5 constant
+            order_type_lower = order_type.lower()
+            if order_type_lower == "buy":
+                order_type_mt5 = mt5.ORDER_TYPE_BUY
+            elif order_type_lower == "sell":
+                order_type_mt5 = mt5.ORDER_TYPE_SELL
+            elif order_type_lower == "buylimit":
+                order_type_mt5 = mt5.ORDER_TYPE_BUY_LIMIT
+            elif order_type_lower == "selllimit":
+                order_type_mt5 = mt5.ORDER_TYPE_SELL_LIMIT
+            elif order_type_lower == "buystop":
+                order_type_mt5 = mt5.ORDER_TYPE_BUY_STOP
+            elif order_type_lower == "sellstop":
+                order_type_mt5 = mt5.ORDER_TYPE_SELL_STOP
+            else:
+                return {"success": False, "error": f"Unknown order type: {order_type}"}
+
             # Get symbol info
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
                 return {"success": False, "error": f"Symbol {symbol} not found"}
-            
+
+            # Get market price
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                return {"success": False, "error": f"Failed to get tick for {symbol}"}
+            if order_type_lower in ["buy", "buylimit", "buystop"]:
+                market_price = tick.ask
+            else:
+                market_price = tick.bid
+
             # --- Helper: Get supported filling modes for the symbol ---
             def get_supported_filling_modes(symbol_info):
                 valid_modes = [getattr(mt5, 'ORDER_FILLING_FOK', 0), getattr(mt5, 'ORDER_FILLING_IOC', 1), getattr(mt5, 'ORDER_FILLING_RETURN', 2)]
@@ -251,9 +402,9 @@ class MT5Service:
                 # If only filling_mode is available, use it if it's valid
                 elif hasattr(symbol_info, 'filling_mode') and symbol_info.filling_mode in valid_modes:
                     modes.append(symbol_info.filling_mode)
-                # Fallback: default to FOK (0)
+                # If nothing reported, try all valid modes
                 if not modes:
-                    modes = [getattr(mt5, 'ORDER_FILLING_FOK', 0)]
+                    modes = valid_modes.copy()
                 logger.info(f"Supported filling modes for {symbol_info.name}: {modes}")
                 return modes
 
@@ -264,12 +415,12 @@ class MT5Service:
                     return {"success": False, "error": f"Symbol {symbol} is not visible and could not be selected."}
 
             supported_modes = get_supported_filling_modes(symbol_info)
-            if not supported_modes:
-                logger.error(f"No supported filling modes found for {symbol}.")
-                return {"success": False, "error": "No supported filling modes for this symbol."}
+            # Always try all valid modes if reported ones fail
+            all_modes = supported_modes + [m for m in [getattr(mt5, 'ORDER_FILLING_FOK', 0), getattr(mt5, 'ORDER_FILLING_IOC', 1), getattr(mt5, 'ORDER_FILLING_RETURN', 2)] if m not in supported_modes]
+            logger.info(f"Order will try filling modes in order: {all_modes}")
 
             last_error = None
-            for filling_mode in supported_modes:
+            for filling_mode in all_modes:
                 # Build request
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
@@ -330,10 +481,10 @@ class MT5Service:
                     logger.warning(f"TP too far for {symbol}: {tp_price} (max allowed: {max_sl_tp_distance})")
                     return {"success": False, "error": f"Take profit too far from price (max: {max_sl_tp_distance})"}
 
-                logger.info(f"MT5 order request: {request}")
+                logger.info(f"MT5 order request (filling_mode={filling_mode}): {request}")
                 # Send order
                 result = mt5.order_send(request)
-                logger.info(f"MT5 order result: {result}")
+                logger.info(f"MT5 order result (filling_mode={filling_mode}): {result}")
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
                     logger.info(f"Order placed successfully: {result.order}")
                     # Record trade in DB

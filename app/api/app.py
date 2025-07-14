@@ -273,23 +273,13 @@ async def mt5_connect(credentials: dict):
         if not all([login, password, server]):
             raise HTTPException(status_code=400, detail="Missing credentials")
         
-        # Mock MT5 connection - replace with actual MT5 integration
-        logger.info(f"Connecting to MT5: {login}@{server}")
-        
-        # Simulate connection success
-        connection_result = {
-            "success": True,
-            "message": "Connected successfully",
-            "account_info": {
-                "login": login,
-                "server": server,
-                "balance": 10000.0,
-                "equity": 10000.0
-            }
-        }
-        
-        logger.info(f"MT5 connection successful for {login}")
-        return connection_result
+        # Call the real MT5 connection logic
+        result = await mt5_service.connect(login, password, server)
+        if not result.get("success"):
+            logger.error(f"MT5 connection failed for {login}: {result.get('error')}")
+        else:
+            logger.info(f"MT5 connection successful for {login}")
+        return result
         
     except Exception as e:
         logger.error(f"MT5 connection error: {e}")
