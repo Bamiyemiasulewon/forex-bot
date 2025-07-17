@@ -4,6 +4,9 @@ Main entry point for the Forex Trading Bot
 Combines FastAPI server and Telegram bot in a single process
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 import logging
 import os

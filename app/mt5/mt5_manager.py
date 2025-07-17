@@ -1,125 +1,65 @@
-try:
-    import MetaTrader5 as mt5
-    MT5_AVAILABLE = True
-except ImportError:
-    MT5_AVAILABLE = False
-    mt5 = None
+import MetaTrader5 as mt5
+import logging
+import time
+import concurrent.futures
 
-import threading
+logger = logging.getLogger("mt5_service")
 
-class MT5Manager:
+class MT5Service:
     def __init__(self):
-        self.sessions = {}
-        self.lock = threading.Lock()
-        self.latest_signals = {}  # Optional: store latest signal per user
+        self.connected = False
+        self.last_login = None
 
-    def connect(self, user_id, login, password, server):
-        if not MT5_AVAILABLE:
-            return False, "MetaTrader5 package not available"
-        
-        with self.lock:
-            if user_id in self.sessions:
-                self.disconnect(user_id)
-            if not mt5.initialize():
-                return False, "MT5 terminal initialization failed"
-            authorized = mt5.login(login=int(login), password=password, server=server)
-            if not authorized:
-                return False, f"MT5 login failed: {mt5.last_error()}"
-            self.sessions[user_id] = True
-            return True, "Connected"
+    def _do_connect(self, login, password, server):
+        return mt5.initialize(login=login, password=password, server=server)
 
-    def disconnect(self, user_id):
-        if not MT5_AVAILABLE:
-            return
-            
-        with self.lock:
-            if user_id in self.sessions:
-                mt5.shutdown()
-                del self.sessions[user_id]
+    def connect(self, login, password, server, max_retries=3, backoff=2):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            for attempt in range(1, max_retries + 1):
+                logger.info(f"Attempting MT5 connection (try {attempt}/{max_retries})...")
+                future = executor.submit(self._do_connect, login, password, server)
+                try:
+                    result = future.result(timeout=10)  # 10 seconds timeout
+                except concurrent.futures.TimeoutError:
+                    logger.error("MT5 connection attempt timed out.")
+                    result = False
+                if result:
+                    self.connected = True
+                    self.last_login = login
+                    logger.info("MT5 connected successfully.")
+                    return True
+                else:
+                    error = mt5.last_error()
+                    logger.error(f"MT5 connection failed: {error}")
+                    if attempt < max_retries:
+                        time.sleep(backoff ** attempt)
+            self.connected = False
+            return False
 
-    def is_connected(self, user_id):
-        return self.sessions.get(user_id, False)
+    def disconnect(self):
+        mt5.shutdown()
+        self.connected = False
+        logger.info("MT5 disconnected.")
 
-    def get_account_info(self, user_id):
-        if not MT5_AVAILABLE:
+    def is_connected(self):
+        return self.connected and mt5.terminal_info() is not None
+
+    def get_balance(self):
+        if not self.is_connected():
+            logger.warning("MT5 not connected when fetching balance.")
             return None
-            
-        if not self.is_connected(user_id):
-            return None
-        info = mt5.account_info()
-        if info:
-            return {
-                "login": info.login,
-                "balance": info.balance,
-                "equity": info.equity,
-                "margin": info.margin,
-                "free_margin": info.margin_free,
-                "leverage": info.leverage,
-                "name": getattr(info, 'name', ''),
-                "server": info.server,
-            }
+        account_info = mt5.account_info()
+        if account_info:
+            return account_info.balance
+        logger.error("Failed to fetch account info from MT5.")
         return None
 
-    def get_open_trades(self, user_id):
-        if not MT5_AVAILABLE:
+    def get_data(self, symbol, timeframe=mt5.TIMEFRAME_M15, count=100):
+        if not self.is_connected():
+            logger.warning("MT5 not connected when fetching data.")
             return None
-            
-        if not self.is_connected(user_id):
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+        if rates is None or len(rates) == 0:
+            logger.warning(f"No data for {symbol}.")
             return None
-        positions = mt5.positions_get()
-        if positions is None:
-            return []
-        trades = []
-        for pos in positions:
-            trades.append({
-                "ticket": pos.ticket,
-                "symbol": pos.symbol,
-                "type": "buy" if pos.type == mt5.POSITION_TYPE_BUY else "sell",
-                "volume": pos.volume,
-                "price_open": pos.price_open,
-                "sl": pos.sl,
-                "tp": pos.tp,
-                "profit": pos.profit,
-                "time": pos.time,
-            })
-        return trades
-
-    def place_trade(self, user_id, symbol, trade_type, lot, sl, tp):
-        if not MT5_AVAILABLE:
-            return False, "MetaTrader5 package not available"
-            
-        if not self.is_connected(user_id):
-            return False, "Not connected to MT5"
-        symbol_info = mt5.symbol_info(symbol)
-        if symbol_info is None:
-            return False, f"Symbol {symbol} not found"
-        if not symbol_info.visible:
-            mt5.symbol_select(symbol, True)
-        price = mt5.symbol_info_tick(symbol).ask if trade_type == "buy" else mt5.symbol_info_tick(symbol).bid
-        order_type = mt5.ORDER_TYPE_BUY if trade_type == "buy" else mt5.ORDER_TYPE_SELL
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": float(lot),
-            "type": order_type,
-            "price": price,
-            "sl": float(sl) if sl else 0.0,
-            "tp": float(tp) if tp else 0.0,
-            "deviation": 20,
-            "magic": 123456,
-            "comment": "TelegramBotTrade",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            return False, f"Order failed: {result.comment}"
-        return True, f"Order placed! Ticket: {result.order}"
-
-    def get_latest_signal(self, user_id):
-        # Optional: implement if you want to store signals per user
-        return self.latest_signals.get(user_id)
-
-    def set_latest_signal(self, user_id, signal):
-        # Optional: call this from your strategy engine
-        self.latest_signals[user_id] = signal 
+        return rates 

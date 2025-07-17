@@ -25,19 +25,42 @@ class MT5FillingModeHandler:
         self.logger = logger
         self.SessionLocal = session_local
         self.Trade = trade_model
+        # Symbol-specific filling mode preferences (case-insensitive)
+        self.symbol_mode_preferences = {
+            'USDCHF': [0, 1, 2],
+            'USDCAD': [0, 1, 2],
+            'EURGBP': [0, 1, 2],
+        }
 
     def get_supported_filling_modes(self, symbol_info):
         valid_modes = [getattr(self.mt5, 'ORDER_FILLING_FOK', 0), getattr(self.mt5, 'ORDER_FILLING_IOC', 1), getattr(self.mt5, 'ORDER_FILLING_RETURN', 2)]
-        modes = []
-        if hasattr(symbol_info, 'filling_modes') and symbol_info.filling_modes:
-            for mode in valid_modes:
-                if symbol_info.filling_modes & mode:
-                    modes.append(mode)
-        elif hasattr(symbol_info, 'filling_mode') and symbol_info.filling_mode in valid_modes:
-            modes.append(symbol_info.filling_mode)
-        if not modes:
-            modes = valid_modes.copy()
+        symbol = symbol_info.name.upper() if hasattr(symbol_info, 'name') else None
+        # Use symbol-specific preference if available (case-insensitive)
+        if symbol and symbol in self.symbol_mode_preferences:
+            modes = self.symbol_mode_preferences[symbol]
+        else:
+            # Default: FOK, IOC, RETURN
+            modes = [0, 1, 2]
+        # Filter to only valid modes for this MT5 instance
+        modes = [m for m in modes if m in valid_modes]
+        self.logger.info(f"Optimized filling mode order for {symbol}: {modes}")
         return modes
+
+    def round_volume_and_price(self, symbol, volume, price, sl=None, tp=None):
+        # Get symbol info and round volume and price to allowed steps/digits
+        info = self.mt5.symbol_info(symbol)
+        if not info:
+            return volume, price, sl, tp
+        # Volume rounding
+        min_vol = getattr(info, 'volume_min', 0.01)
+        max_vol = getattr(info, 'volume_max', 100.0)
+        step_vol = getattr(info, 'volume_step', 0.01)
+        rounded_vol = max(min_vol, min(max_vol, round(volume / step_vol) * step_vol))
+        # Price rounding
+        digits = getattr(info, 'digits', 5)
+        def r(x):
+            return round(x, digits) if x is not None else None
+        return rounded_vol, r(price), r(sl), r(tp)
 
     def place_order_with_fallback(self, symbol, volume, order_type, price, sl=None, tp=None, magic_number=0, user_id=None):
         mt5 = self.mt5
@@ -77,6 +100,9 @@ class MT5FillingModeHandler:
             market_price = tick.bid
         if price is not None:
             market_price = price
+
+        # --- Symbol-specific volume and price rounding ---
+        volume, market_price, sl, tp = self.round_volume_and_price(symbol, volume, market_price, sl, tp)
 
         supported_modes = self.get_supported_filling_modes(symbol_info)
         all_modes = supported_modes + [m for m in [getattr(mt5, 'ORDER_FILLING_FOK', 0), getattr(mt5, 'ORDER_FILLING_IOC', 1), getattr(mt5, 'ORDER_FILLING_RETURN', 2)] if m not in supported_modes]

@@ -11,6 +11,11 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 from services.mt5_service import mt5_service
+from app.mt5.mt5_manager import MT5Service
+from app.security.simple_credential_manager import SimpleCredentialManager
+
+mt5_service = MT5Service()
+credential_manager = SimpleCredentialManager()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -264,23 +269,20 @@ async def calculate_pip_value(pair: str, trade_size: float):
 
 @app.post("/api/mt5/connect")
 async def mt5_connect(credentials: dict):
-    """Connect to MT5 with credentials."""
+    """Connect to MT5 with credentials and store them securely."""
     try:
         login = credentials.get("login")
         password = credentials.get("password")
         server = credentials.get("server")
-        
-        if not all([login, password, server]):
-            raise HTTPException(status_code=400, detail="Missing credentials")
-        
-        # Call the real MT5 connection logic
-        result = await mt5_service.connect(login, password, server)
-        if not result.get("success"):
-            logger.error(f"MT5 connection failed for {login}: {result.get('error')}")
+        user_id = credentials.get("user_id")
+        if not all([login, password, server, user_id]):
+            raise HTTPException(status_code=400, detail="Missing credentials or user_id")
+        success = mt5_service.connect(login, password, server)
+        if success:
+            credential_manager.add_or_update_credentials(user_id, login, password, server)
+            return {"success": True}
         else:
-            logger.info(f"MT5 connection successful for {login}")
-        return result
-        
+            return {"success": False, "error": "MT5 connection failed. Check credentials and ensure MT5 terminal is running."}
     except Exception as e:
         logger.error(f"MT5 connection error: {e}")
         return {"success": False, "error": str(e)}
@@ -312,21 +314,13 @@ async def mt5_status():
 
 @app.get("/api/mt5/balance")
 async def mt5_balance():
-    """Get account balance information."""
+    """Get account balance information from MT5."""
     try:
-        # Mock balance data - replace with actual MT5 balance fetch
-        balance_data = {
-            "balance": 10000.0,
-            "equity": 10050.0,
-            "margin": 0.0,
-            "free_margin": 10050.0,
-            "margin_level": 0.0,
-            "currency": "USD"
-        }
-        
-        logger.info("MT5 balance fetched")
-        return balance_data
-        
+        balance = mt5_service.get_balance()
+        if balance is not None:
+            return {"balance": balance}
+        else:
+            raise HTTPException(status_code=503, detail="Could not fetch balance. MT5 not connected.")
     except Exception as e:
         logger.error(f"MT5 balance error: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch balance")

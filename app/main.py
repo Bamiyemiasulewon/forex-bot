@@ -16,6 +16,13 @@ from app.telegram.bot_manager import bot_manager
 from app.utils.config import config
 from app.utils.logging_config import setup_logging
 from app.services.database_service import create_db_and_tables
+from app.security.simple_credential_manager import SimpleCredentialManager
+from app.mt5.mt5_manager import MT5Service
+import sqlite3
+from app.telegram.bot import start_telegram_bot
+
+credential_manager = SimpleCredentialManager()
+mt5_service = MT5Service()
 
 # Setup logging
 setup_logging(log_level=config.log_level)
@@ -58,6 +65,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    # Auto-reconnect for all users with stored credentials
+    try:
+        with sqlite3.connect(credential_manager.db_path) as conn:
+            for row in conn.execute("SELECT user_id FROM credentials"):
+                creds = credential_manager.get_credentials(row[0])
+                if creds:
+                    login, password, server = creds
+                    mt5_service.connect(login, password, server)
+    except Exception as e:
+        print(f"[Startup] Error during auto-reconnect: {e}")
+    # Start the Telegram bot as a background task
+    import asyncio
+    asyncio.create_task(start_telegram_bot())
 
 @app.get('/')
 def root():
@@ -149,14 +172,18 @@ async def get_strategies():
         "message": "These strategies are designed for different market conditions."
     }
 
+def main():
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger.info("🚀 Starting Forex Trading Bot...")
+    # The bot is now started in the FastAPI startup event
+    # No need to run asyncio.run(start_telegram_bot()) here
+    pass
+
 if __name__ == "__main__":
-    print("🚀 Starting Forex Trading Bot API Server...")
-    print("🌐 Server will be available at: http://127.0.0.1:8000")
-    print("📊 Health check: http://127.0.0.1:8000/health")
-    print("📚 API docs: http://127.0.0.1:8000/docs")
-    print("\n💡 Keep this terminal open to keep the server running.")
-    print("   Press Ctrl+C to stop the server.")
-    
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
+    main()
 
 

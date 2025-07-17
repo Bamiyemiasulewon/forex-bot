@@ -8,6 +8,7 @@ import time
 import tracemalloc
 import signal
 import traceback
+import json
 
 # Enable tracemalloc for debugging memory leaks
 tracemalloc.start()
@@ -89,7 +90,6 @@ from telegram.ext import (
 )
 from app.services.api_service import api_service, ApiService  # Import the instance and class
 import httpx
-from app.security.credential_manager import CredentialManager
 from app.telegram.orderblock_commands import (
     orderblock_command, orderblock_status_command, scan_orderblocks_command
 )
@@ -98,6 +98,8 @@ from app.services.signal_service import signal_service
 from cryptography.fernet import Fernet
 from app.services.order_block_strategy import order_block_strategy
 from app.services.market_structure_strategy import market_structure_strategy
+from app.security.simple_credential_manager import SimpleCredentialManager
+credential_manager = SimpleCredentialManager("credentials.db")
 
 logger = logging.getLogger(__name__)
 
@@ -393,10 +395,28 @@ async def handle_personal_callback(update: Update, context: ContextTypes.DEFAULT
 
 # --- Command Handlers (Frontend Logic Only) ---
 
+CHAT_ID_FILE = 'registered_chat_ids.json'
+
+def save_chat_id(chat_id):
+    try:
+        if os.path.exists(CHAT_ID_FILE):
+            with open(CHAT_ID_FILE, 'r') as f:
+                chat_ids = set(json.load(f))
+        else:
+            chat_ids = set()
+        chat_ids.add(str(chat_id))
+        with open(CHAT_ID_FILE, 'w') as f:
+            json.dump(list(chat_ids), f)
+        logger.info(f"Registered chat_id: {chat_id}")
+    except Exception as e:
+        logger.error(f"Failed to save chat_id: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
+    chat_id = update.effective_chat.id
     user_name = user.first_name or "Trader"
+    credential_manager.set_chat_id(user_id, chat_id)
     prefs = get_user_preferences(user_id)
     menu_text = f"""👋 Hi {user_name}!!\n\nWelcome to your Personal Forex Assistant Menu.\n\nSelect an option below to manage your trading or get help.\n\nYour risk profile: {prefs.get('risk_profile', 'N/A')}\nTrading style: {prefs.get('trading_style', 'N/A')}\n\nNB: Click on the Menu button to see list on commands"""
     await update.message.reply_text(menu_text)
@@ -1192,9 +1212,7 @@ async def scan_orderblocks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Multi-step MT5 connection process with credential storage"""
     user_id = update.effective_user.id
-    # Clean up expired sessions first
     session_manager.cleanup_expired_sessions()
-    # If user has arguments, use the old single-step method for backward compatibility
     if context.args and len(context.args) >= 3:
         login, password, server = context.args[0], context.args[1], context.args[2]
         loading_msg = await update.message.reply_text("🔗 Connecting to MT5...")
@@ -1208,13 +1226,7 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await loading_msg.edit_text("❌ **Connection Failed:** API server is not running. Please start the server first.")
                 return
             if data.get("success"):
-                # Store credentials securely
-                credential_manager.store_credentials(user_id, login, password, server)
-                # Reset AI and trade history for this user
-                from app.services.ai_trading_service import ai_trading_service
-                from app.services.signal_service import signal_service
-                ai_trading_service.reset_user_history(user_id)
-                signal_service.clear_trade_history(user_id)
+                credential_manager.add_or_update_credentials(user_id, login, password, server)
                 await loading_msg.edit_text("✅ **MT5 Connected Successfully!**\n\nAccount ready for trading.")
             else:
                 error_msg = data.get("error", "Connection failed. Please check your credentials.")
@@ -1222,7 +1234,6 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await loading_msg.edit_text(f"❌ **Connection Failed:** {str(e)}")
         return
-    # Start multi-step process
     session_manager.create_session(user_id, "mt5_connect")
     await update.message.reply_text(
         "🔗 **MT5 Connection Setup**\n\n"
@@ -2627,16 +2638,13 @@ async def disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Disconnect MT5 and clear stored credentials for the user."""
     user_id = update.effective_user.id
     credential_manager.delete_credentials(user_id)
-    # Optionally, call an API endpoint to disconnect MT5 session if needed
     await update.message.reply_text("🔌 Disconnected from MT5 and credentials cleared.")
 
 # Helper to auto-connect MT5 for a user if not connected
 async def ensure_mt5_connected(user_id):
     creds = credential_manager.get_credentials(user_id)
     if creds:
-        login, password, server = creds
-        # Call your API to connect if not already connected
-        # (You may want to cache connection state per user in memory for efficiency)
+        login, password, server, _ = creds
         await api_service.make_api_call("/api/mt5/connect", method="POST", json={
             "login": login,
             "password": password,
@@ -2644,13 +2652,6 @@ async def ensure_mt5_connected(user_id):
         })
         return True
     return False
-
-
-
-# Setup CredentialManager if not already present
-CREDENTIAL_KEY = os.getenv('CREDENTIAL_KEY', Fernet.generate_key())
-CREDENTIAL_DB = os.getenv('CREDENTIAL_DB', 'mt5_credentials.db')
-credential_manager = CredentialManager(CREDENTIAL_DB, CREDENTIAL_KEY)
 
 async def analyze_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Analyze all predefined trading pairs and return a summary for each."""
